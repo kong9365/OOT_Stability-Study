@@ -153,6 +153,32 @@ def parse_criterion(text):
     return (None, None)
 
 
+def parse_unit(text):
+    """시험기준 텍스트 → 단위 문자열(%, mg/100mL, ppm 등). 없으면 ''."""
+    if text is None or (isinstance(text, float) and np.isnan(text)):
+        return ""
+    s = str(text)
+    if any(k in s for k in _QUAL_KW):
+        return ""
+    # 숫자 바로 뒤의 단위 토큰(복합단위 mg/100mL, CFU/mL 포함). 한글 단어는 제외.
+    m = re.search(r"\d[\d.,]*\s*(%|[A-Za-zµμ㎍㎎]+(?:\s*/\s*[\dA-Za-z]+)*)", s)
+    if not m:
+        return ""
+    return re.sub(r"\s+", "", m.group(1))
+
+
+def spec_text(lo, hi, unit):
+    """규격 (하한, 상한, 단위) → 사람이 읽는 표기."""
+    u = (" " + unit) if unit else ""
+    if lo is not None and hi is not None:
+        return f"{lo:g} ~ {hi:g}{u}".strip()
+    if lo is not None:
+        return f"{lo:g}{u} 이상".strip()
+    if hi is not None:
+        return f"{hi:g}{u} 이하".strip()
+    return "—"
+
+
 def _year_of(lot: str) -> str:
     return ("20" + lot[:2]) if lot[:2].isdigit() else "기타"
 
@@ -260,13 +286,15 @@ def stability_df(code: str, test_type: str) -> pd.DataFrame:
         val = _num(row.get("LOT결과_0제외", ""))
         if month is None or np.isnan(val):
             continue
-        lo, hi = parse_criterion(row.get("시험기준", ""))
+        crit = row.get("시험기준", "")
+        lo, hi = parse_criterion(crit)
         rec.append({"제조번호": str(row.get("제조번호", "")).strip(),
                     "시험항목": str(row.get("시험항목", "")).strip(),
                     "대분류": str(row.get("대분류", "")).strip(),
                     "시점(개월)": month, "결과값": val,
                     "규격하한": lo if lo is not None else float("nan"),
                     "규격상한": hi if hi is not None else float("nan"),
+                    "단위": parse_unit(crit),
                     "제조일자": str(row.get("제조일자", "")).strip(),
                     "유효기한": str(row.get("유효기한", "")).strip()})
 
@@ -287,12 +315,14 @@ def stability_df(code: str, test_type: str) -> pd.DataFrame:
                 key = (b, item)
                 if key not in stab_keys or key in have0 or np.isnan(val):
                     continue
-                lo, hi = parse_criterion(row.get("시험기준", ""))
+                crit = row.get("시험기준", "")
+                lo, hi = parse_criterion(crit)
                 rec.append({"제조번호": b, "시험항목": item,
                             "대분류": str(row.get("대분류", "")).strip(),
                             "시점(개월)": 0.0, "결과값": val,
                             "규격하한": lo if lo is not None else float("nan"),
                             "규격상한": hi if hi is not None else float("nan"),
+                            "단위": parse_unit(crit),
                             "제조일자": str(row.get("제조일자", "")).strip(),
                             "유효기한": str(row.get("유효기한", "")).strip()})
                 have0.add(key)
@@ -406,6 +436,12 @@ def stability_analysis(code: str, test_type: str, spec_low: float = 90.0,
     d.loc[both_na, "규격상한"] = spec_high
     sl = float(d["규격하한"].dropna().iloc[0]) if d["규격하한"].notna().any() else None
     sh = float(d["규격상한"].dropna().iloc[0]) if d["규격상한"].notna().any() else None
+    # 단위·규격표기 (선택 시험항목 기준)
+    unit = ""
+    if "단위" in d.columns:
+        uvals = [str(x) for x in d["단위"] if str(x).strip()]
+        unit = uvals[0] if uvals else ""
+    spec_str = spec_text(sl, sh, unit)
 
     # 허가 유효기간(개월) = 유효기한 − 제조일자 (배치별, 행정상 승인값)
     approved = {}
@@ -470,6 +506,7 @@ def stability_analysis(code: str, test_type: str, spec_low: float = 90.0,
     return {
         "ok": True, "code": code, "testType": test_type, "testItem": item,
         "testItems": items, "batch": batch, "method": method, "specLow": sl, "specHigh": sh,
+        "unit": unit, "specText": spec_str,
         "batchCount": len(batches), "pairCount": pair_count,
         "approvedMonths": approved_months, "approvedShort": approved_short,
         "batches": batches, "worst": worst,

@@ -6,7 +6,8 @@ const S = {
   // OOT
   ootTestType: '완제품', ootProducts: [], query: '', open: false,
   code: null, productName: '', lotSummary: null, years: ['전체'],
-  yearFilter: '전체', lotQuery: '', lot: null,
+  yearFilter: '전체', lotQuery: '', lot: null, ootComp: null,
+  ootStabData: null, ootStabKey: '', ootStabLoading: false,
   // Stability
   stabTestType: '시판후 안정성시험(Ongoing Stability)', stabProducts: [],
   stabCode: null, stabName: '', stabFromOot: false,
@@ -158,6 +159,69 @@ function normalItemsTable(lot) {
     <div style="font-size:11px;color:#9aa4b4;margin-top:8px">σ편차 = (결과값 − μ) / σ · ±2σ 이내 정상 · 정성항목(미생물·확인·성상 등)은 σ 판정 대상이 아니어 제외</div></div>`;
 }
 
+function ootStabSummary() {
+  if (!S.ootComp || S.ootStabLoading) return { ready: false };
+  const A = S.ootStabData;
+  if (!A || !A.ok) return { ready: false };
+  const use = ootStabBatches();
+  if (!use.length) return { ready: false };
+  const sigma = A.sigma;
+  let crit = 0, warn = 0, normal = 0;
+  use.forEach(b => {
+    const sg = sigma || b.se;
+    b.pts.forEach(p => {
+      if (b.slope != null && sg) {
+        const az = Math.abs((p[1] - (b.intercept + b.slope * p[0])) / sg);
+        if (az > 3) crit++; else if (az > 2) warn++; else normal++;
+      } else normal++;
+    });
+  });
+  return { ready: true, crit, warn, normal, n: crit + warn + normal };
+}
+
+function ootStabTpTable() {
+  const box = (msg) => `<div style="margin-top:18px;background:#fff;border:1px dashed #cfd6e0;border-radius:13px;padding:28px;text-align:center;color:#9aa4b4;font-size:13px">${msg}</div>`;
+  if (!S.ootComp) return box('위 <b>시점별 OOT 관리도</b>에서 성분(시험항목)을 선택하면 시점별 판정이 표시됩니다.');
+  if (S.ootStabLoading) return box('시점 데이터 불러오는 중…');
+  const A = S.ootStabData;
+  if (!A || !A.ok) return box(A && A.reason ? esc(A.reason) : '시점 데이터를 산출할 수 없습니다.');
+  const use = ootStabBatches();
+  if (!use.length) return box('선택한 배치의 시점 데이터가 없습니다.');
+  const sigma = A.sigma;
+  let nOot = 0, nWarn = 0;
+  const multi = use.length > 1;
+  const rowsHtml = use.flatMap(b => {
+    const sg = sigma || b.se;
+    return b.pts.map(p => {
+      const m = p[0], v = p[1];
+      const pred = b.slope != null ? b.intercept + b.slope * m : null;
+      const dev = (pred != null && sg) ? (v - pred) / sg : null;
+      const az = dev == null ? 0 : Math.abs(dev);
+      if (az > 3) nOot++; else if (az > 2) nWarn++;
+      const judge = dev == null ? '—' : az > 3 ? '⚠ OOT' : az > 2 ? '주의' : '정상';
+      const C = az > 3 ? { fg: '#b91c1c', bg: '#fef2f2', tb: '#fde0e0' } : az > 2 ? { fg: '#b45309', bg: '#fffbeb', tb: '#fdedc4' } : { fg: '#15803d', bg: '#fff', tb: '#ecfdf3' };
+      const devColor = az > 3 ? '#dc2626' : az > 2 ? '#d97706' : '#5b6573';
+      return `<div style="display:grid;grid-template-columns:.8fr 1fr 1fr 1fr 1fr 1.2fr;border-top:1px solid #f2f4f8;background:${C.bg};font-size:12.5px">
+        <div style="padding:10px 12px;font-family:${MONO};color:#5b6573">${multi ? esc(b.batch) : '·'}</div>
+        <div style="padding:10px 12px;text-align:right;font-family:${MONO};color:#27303f">${m}</div>
+        <div style="padding:10px 12px;text-align:right;font-family:${MONO};color:#27303f">${fmt(v, 2)}</div>
+        <div style="padding:10px 12px;text-align:right;font-family:${MONO};color:#5b6573">${pred == null ? '—' : fmt(pred, 2)}</div>
+        <div style="padding:10px 12px;text-align:right;font-family:${MONO};font-weight:600;color:${devColor}">${dev == null ? '—' : (dev >= 0 ? '+' : '−') + Math.abs(dev).toFixed(2) + 'σ'}</div>
+        <div style="padding:10px 12px"><span style="font-size:11.5px;font-weight:600;padding:3px 10px;border-radius:999px;background:${C.tb};color:${C.fg}">${judge}</span></div></div>`;
+    });
+  }).join('');
+  const ss = 'margin-top:13px;padding:11px 15px;border-radius:11px;font-size:12.5px;font-weight:600';
+  const sum = nOot ? `<div style="${ss};background:#fef2f2;color:#b91c1c">⚠ OOT ${nOot}건 — ±3σ 관리한계 이탈. 원인조사 대상.</div>`
+    : nWarn ? `<div style="${ss};background:#fffbeb;color:#b45309">주의 ${nWarn}건 — 추세선 ±2σ~±3σ 구간.</div>`
+      : `<div style="${ss};background:#f1fbf4;color:#15803d">시점간 OOT 없음 — 모든 시점이 추세선 ±2σ 이내.</div>`;
+  return `<div style="margin-top:18px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:11px;flex-wrap:wrap"><span style="font-size:14.5px;font-weight:700">시점별 시험결과</span><span style="font-size:11.5px;color:#9aa4b4">${esc(A.testItem)} · 추세선 대비 ±2σ(주의)/±3σ(관리한계) 판정</span></div>
+    <div style="border:1px solid #e7ebf1;border-radius:12px;overflow:hidden">
+      <div style="display:grid;grid-template-columns:.8fr 1fr 1fr 1fr 1fr 1.2fr;background:#f5f7fa;border-bottom:1px solid #e7ebf1;font-size:11px;font-weight:600;color:#8a94a6">
+        <div style="padding:9px 12px">배치</div><div style="padding:9px 12px;text-align:right">시점(개월)</div><div style="padding:9px 12px;text-align:right">측정값</div><div style="padding:9px 12px;text-align:right">추세예측</div><div style="padding:9px 12px;text-align:right">σ편차</div><div style="padding:9px 12px">판정</div></div>
+      ${rowsHtml}</div>${sum}</div>`;
+}
+
 function ootResults() {
   const lot = S.lot && S.lotSummary ? S.lotSummary.lots.find(l => l.lot === S.lot) : null;
   if (!lot) {
@@ -166,9 +230,18 @@ function ootResults() {
       <div style="font-size:15.5px;font-weight:600;color:#5b6573;margin-top:16px">LOT을 선택하면 판정 결과가 표시됩니다</div>
       <div style="font-size:13px;color:#9aa4b4;margin-top:6px">완제품 · 품목코드 · 제조번호 순으로 선택하세요</div></div>`;
   }
-  const st = lot.crit > 0 ? 'red' : lot.warn > 0 ? 'yellow' : 'green';
+  // 배너 집계: 완제품 등은 로트별(lotSummary), 안정성은 선택성분의 시점별 판정 기준
+  const stab = isStabType(S.ootTestType);
+  const sm = stab ? ootStabSummary() : null;
+  let kpiVals, lastKpi;
+  if (stab && sm && sm.ready) { kpiVals = { crit: sm.crit, warn: sm.warn, normal: sm.normal }; lastKpi = ['시점 수', sm.n, '#94a3b8']; }
+  else if (stab) { kpiVals = { crit: 0, warn: 0, normal: 0 }; lastKpi = ['시점 수', 0, '#94a3b8']; }
+  else { kpiVals = { crit: lot.crit, warn: lot.warn, normal: lot.normal }; lastKpi = ['정성 제외', lot.qual, '#94a3b8']; }
+  const st = kpiVals.crit > 0 ? 'red' : kpiVals.warn > 0 ? 'yellow' : 'green';
   const TH = { red: { bg: '#fef4f4', bd: '#f6c9c9', fg: '#b91c1c' }, yellow: { bg: '#fffcf2', bd: '#f3dd9f', fg: '#b45309' }, green: { bg: '#f1fbf4', bd: '#bcecca', fg: '#15803d' } }[st];
-  const headline = st === 'red' ? `관리이탈 ${lot.crit}건 — 확인 필요` : st === 'yellow' ? `주의 ${lot.warn}건 발생` : '이상 없음';
+  const headline = (stab && !(sm && sm.ready))
+    ? '성분(시험항목)을 선택하면 시점별 판정이 표시됩니다'
+    : st === 'red' ? `관리이탈 ${kpiVals.crit}건 — 확인 필요` : st === 'yellow' ? `주의 ${kpiVals.warn}건 발생` : (stab ? '시점간 이상 없음' : '이상 없음');
   const icon = st === 'red'
     ? `<div style="width:48px;height:48px;border-radius:13px;background:#fde0e0;display:flex;align-items:center;justify-content:center;flex:0 0 auto"><svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2.2"><path d="M12 8v5"></path><circle cx="12" cy="16.5" r=".6" fill="#dc2626"></circle><path d="M10.3 3.9 2.7 17a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"></path></svg></div>`
     : st === 'yellow'
@@ -210,12 +283,12 @@ function ootResults() {
       <div style="flex:1"><div style="color:${TH.fg};font-size:25px;font-weight:700;letter-spacing:-.015em;line-height:1.2">${headline}</div>
         <div style="font-size:13.5px;color:#5b6573;margin-top:7px">LOT ${esc(lot.lot)} · ${esc(S.productName)} · 품목코드 ${esc(S.code)}</div></div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-self:stretch">
-        ${kpi('관리이탈', lot.crit, '#dc2626')}${kpi('주의', lot.warn, '#d97706')}${kpi('정상', lot.normal, '#16a34a')}${kpi('정성 제외', lot.qual, '#94a3b8')}</div></div>
+        ${kpi('관리이탈', kpiVals.crit, '#dc2626')}${kpi('주의', kpiVals.warn, '#d97706')}${kpi('정상', kpiVals.normal, '#16a34a')}${kpi(lastKpi[0], lastKpi[1], lastKpi[2])}</div></div>
     <div style="display:flex;align-items:center;gap:12px;margin:13px 2px 0;flex-wrap:wrap">
       <button data-act="jumpStab" style="display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid #E5310F;border-radius:10px;background:#fff;color:#E5310F;font-size:12.5px;font-weight:600;cursor:pointer">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#E5310F" stroke-width="2"><path d="M3 3v18h18"></path><path d="m19 7-6 7-4-3-4 5"></path></svg>이 품목 안정성 분석</button>
       <a href="${'http://tableau.ekdp.com/#/home'}" target="_blank" style="font-size:12.5px;color:#8a94a6;display:flex;align-items:center;gap:6px;text-decoration:none">상세 추이·관리도는 Tableau에서 확인<span style="color:#E5310F;font-weight:600">→</span></a></div>
-    ${ootBlock}${normalItemsTable(lot)}`;
+    ${isStabType(S.ootTestType) ? ootStabTpTable() : ootBlock + normalItemsTable(lot)}`;
 }
 
 function ootRail() {
@@ -231,6 +304,194 @@ function ootRail() {
         <span style="font-size:12.5px;font-weight:600;color:#E5310F;background:#fdece8;padding:5px 11px;border-radius:8px">${esc(policyChip)}</span>
         <div style="font-size:11px;color:#9aa4b4;margin-top:11px;line-height:1.55">신규 OOT만 발송(중복 자동 차단). 실시간성은 Tableau extract 갱신 주기에 종속됩니다.</div></div></div>
   </aside>`;
+}
+
+function ootCompList() {
+  if (!S.lotSummary) return [];
+  const names = new Set();
+  S.lotSummary.lots.forEach(l => (l.normalItems || []).concat(l.items || []).forEach(it => {
+    if (it.sd != null && it.sd > 0) names.add(it.name);
+  }));
+  return [...names].sort((a, b) => a.localeCompare(b, 'ko'));
+}
+
+function ootCompData(comp) {
+  const rows = [];
+  let mean = null, sd = null;
+  S.lotSummary.lots.forEach(l => {
+    const it = (l.normalItems || []).concat(l.items || []).find(x => x.name === comp);
+    if (it && it.val != null) { rows.push([l.lot, it.val]); if (mean == null) { mean = it.mean; sd = it.sd; } }
+  });
+  rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  return { rows, mean, sd };
+}
+
+function isStabType(t) { return /안정성|stability|long ?term|ongoing|accel/i.test(t || ''); }
+function stabTicks(t) {
+  if (/가속|accel/i.test(t)) return [0, 3, 6];
+  if (/시판후|ongoing/i.test(t)) return [0, 12, 24, 36];
+  return [0, 3, 6, 9, 12, 18, 24, 36];  // 장기·4b장기 등
+}
+
+async function loadOotStab() {
+  if (!(S.nav === 'oot' && S.code && isStabType(S.ootTestType) && S.ootComp)) return;
+  const key = [S.code, S.ootTestType, S.ootComp].join('|');
+  if (S.ootStabKey === key && S.ootStabData) { renderOotCompChart(); return; }
+  S.ootStabKey = key; S.ootStabLoading = true; renderOotCompChart();
+  try {
+    const p = new URLSearchParams({ code: S.code, test_type: S.ootTestType, test_item: S.ootComp, method: 'pooled' });
+    if (S.specLow) p.set('spec_low', S.specLow);
+    if (S.specHigh) p.set('spec_high', S.specHigh);
+    S.ootStabData = await getJSON('/api/stability?' + p);
+  } catch (e) { S.ootStabData = { ok: false, reason: String(e) }; }
+  S.ootStabLoading = false; render();
+}
+
+function ootStabBatches() {
+  const A = S.ootStabData;
+  if (!A || !A.ok) return [];
+  const b = S.lot ? A.batches.filter(x => String(x.batch) === String(S.lot)) : A.batches;
+  return b.filter(x => x.pts && x.pts.length);
+}
+
+function buildOotStabPlotly() {
+  const use = ootStabBatches();
+  if (!use.length) return null;
+  const A = S.ootStabData;
+  const allM = use.flatMap(b => b.pts.map(p => p[0]));
+  const maxData = allM.length ? Math.max(...allM) : 0;
+  // 기본 스케줄(시판후·장기·4b=36개월, 가속=6개월). 데이터가 더 길면 그때만 눈금 연장.
+  const ticks = stabTicks(S.ootTestType).slice();
+  const step = /가속|accel/i.test(S.ootTestType) ? 3 : 12;
+  while (ticks[ticks.length - 1] < maxData) ticks.push(ticks[ticks.length - 1] + step);
+  const xMax = ticks[ticks.length - 1] + (step === 3 ? 0.6 : 1.5);
+  const sigma = A.sigma;
+  const data = [];
+  use.forEach(b => {
+    data.push({ x: b.pts.map(p => p[0]), y: b.pts.map(p => p[1]), mode: 'markers+text', text: b.pts.map(p => fmt(p[1], 1)), textposition: 'top center', textfont: { size: 10, color: '#46536a' }, marker: { color: b.color || '#2a78d6', size: 9, line: { color: '#fff', width: 1.3 } }, type: 'scatter', name: '배치 ' + b.batch, hovertemplate: `배치 ${b.batch}<br>%{x}개월 · %{y}<extra></extra>` });
+    if (b.slope != null) {
+      const xb = b.lastT || Math.max(...b.pts.map(p => p[0]));
+      data.push({ x: [0, xb], y: [b.intercept, b.intercept + b.slope * xb], mode: 'lines', line: { color: b.color || '#2a78d6', width: 2 }, hoverinfo: 'skip', showlegend: false, type: 'scatter' });
+      const sg = sigma || b.se;
+      if (sg) {
+        const seg = (k, c, d) => data.push({ x: [0, xb], y: [b.intercept + k * sg, b.intercept + b.slope * xb + k * sg], mode: 'lines', line: { color: c, width: 1, dash: d }, hoverinfo: 'skip', showlegend: false, type: 'scatter' });
+        seg(2, '#eda100', 'dash'); seg(-2, '#eda100', 'dash'); seg(3, '#7c6fdd', 'dot'); seg(-3, '#7c6fdd', 'dot');
+      }
+    }
+  });
+  const shapes = [];
+  if (A.specLow != null) shapes.push({ type: 'line', x0: 0, x1: xMax, y0: A.specLow, y1: A.specLow, line: { color: '#dc2626', width: 1.4, dash: 'dash' } });
+  if (A.specHigh != null) shapes.push({ type: 'line', x0: 0, x1: xMax, y0: A.specHigh, y1: A.specHigh, line: { color: '#dc2626', width: 1.4, dash: 'dash' } });
+  const layout = { height: 380, margin: { l: 48, r: 16, t: 14, b: 48 }, xaxis: { title: '시점 (개월)', tickvals: ticks.filter(t => t <= xMax), range: [-1.5, xMax + 1], gridcolor: '#f5f6f9', zeroline: false }, yaxis: { title: '결과값', gridcolor: '#eef1f5', zeroline: false }, shapes, plot_bgcolor: '#fff', paper_bgcolor: '#fff', font: { family: 'Pretendard Variable, sans-serif', size: 11 }, hovermode: 'closest' };
+  return { data, layout, config: { displayModeBar: false, responsive: true } };
+}
+
+function ootCompStabSection() {
+  const comps = ootCompList();
+  const opts = `<option value="">성분(시험항목) 선택…</option>` +
+    comps.map(c => `<option value="${esc(c)}" ${c === S.ootComp ? 'selected' : ''}>${esc(c)}</option>`).join('');
+  const lotNote = S.lot ? `배치 ${esc(S.lot)}` : '전체 배치';
+  const sel = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:13px;font-weight:700">시점별 OOT 관리도</span>
+      <div style="position:relative">
+        <select data-act="ootComp" style="appearance:none;padding:9px 32px 9px 12px;border:1px solid #d7dce4;border-radius:9px;font-size:13px;font-weight:600;color:#27303f;background:#fff;cursor:pointer;min-width:220px">${opts}</select>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9aa4b4" stroke-width="2.2" style="position:absolute;right:11px;top:50%;transform:translateY(-50%);pointer-events:none"><path d="m6 9 6 6 6-6"></path></svg></div>
+      <span style="font-size:11.5px;color:#9aa4b4">${esc(lotNote)} · 시점(개월)별 추세 ±2σ/±3σ · ${esc(S.ootTestType)}</span></div>`;
+  if (!S.ootComp) {
+    return `<div style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:18px 22px;margin-top:18px">${sel}</div>`;
+  }
+  const A = S.ootStabData;
+  let strip = '', legend = '';
+  if (A && A.ok && !S.ootStabLoading) {
+    const pts = ootStabBatches().flatMap(b => b.pts.map(p => p[1]));
+    const tile = (lab, val, col) => `<div style="background:#fafbfd;border:1px solid #eef1f5;border-radius:10px;padding:8px 13px;min-width:62px"><div style="font-size:10px;color:#8a94a6;margin-bottom:2px">${lab}</div><div style="font-family:${MONO};font-size:14.5px;font-weight:600;color:${col || '#27303f'}">${val}</div></div>`;
+    strip = `<div style="display:flex;gap:9px;flex-wrap:wrap;margin:14px 0 4px">
+      ${tile('규격하한', A.specLow != null ? A.specLow : '—', '#b91c1c')}
+      ${tile('규격상한', A.specHigh != null ? A.specHigh : '—', '#b91c1c')}
+      ${tile('최소값', fmt(pts.length ? Math.min(...pts) : null, 2))}
+      ${tile('최대값', fmt(pts.length ? Math.max(...pts) : null, 2))}
+      ${tile('평균값', fmt(pts.length ? pts.reduce((a, c) => a + c, 0) / pts.length : null, 2))}
+      ${tile('표준편차 σ', fmt(A.sigma, 3), '#6d28d9')}
+      ${tile('시점 수', pts.length)}</div>`;
+    legend = `<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px;font-size:11.5px;color:#5b6573">
+      <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#2a78d6"></span>측정값</span>
+      <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px solid #2a78d6"></span>추세선</span>
+      <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px dashed #eda100"></span>±2σ 주의</span>
+      <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px dotted #7c6fdd"></span>±3σ 관리한계</span>
+      <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px dashed #dc2626"></span>규격</span></div>`;
+  }
+  const body = S.ootStabLoading ? `<div style="padding:48px;text-align:center;color:#9aa4b4">시점 데이터 불러오는 중…</div>`
+    : (A && !A.ok ? `<div style="padding:40px;text-align:center;color:#9aa4b4">${esc(A.reason || '시점 데이터를 산출할 수 없습니다.')}</div>`
+      : `<div id="oot-comp-chart" style="min-height:360px"></div>`);
+  return `<div style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:18px 22px;margin-top:18px">
+    ${sel}${strip}${legend}${body}</div>`;
+}
+
+function ootCompSection() {
+  if (!S.code || !S.lotSummary) return '';
+  if (isStabType(S.ootTestType)) return ootCompStabSection();
+  const comps = ootCompList();
+  if (!comps.length) return '';
+  const opts = `<option value="">성분(시험항목) 선택…</option>` +
+    comps.map(c => `<option value="${esc(c)}" ${c === S.ootComp ? 'selected' : ''}>${esc(c)}</option>`).join('');
+  const sel = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span style="font-size:13px;font-weight:700">성분별 LOT 관리도</span>
+      <div style="position:relative">
+        <select data-act="ootComp" style="appearance:none;padding:9px 32px 9px 12px;border:1px solid #d7dce4;border-radius:9px;font-size:13px;font-weight:600;color:#27303f;background:#fff;cursor:pointer;min-width:220px">${opts}</select>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9aa4b4" stroke-width="2.2" style="position:absolute;right:11px;top:50%;transform:translateY(-50%);pointer-events:none"><path d="m6 9 6 6 6-6"></path></svg></div>
+      <span style="font-size:11.5px;color:#9aa4b4">선택한 성분의 전체 LOT 값을 평균±2σ/±3σ와 비교합니다.</span></div>`;
+  if (!S.ootComp) {
+    return `<div style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:18px 22px;margin-top:18px">${sel}</div>`;
+  }
+  const { rows, mean, sd } = ootCompData(S.ootComp);
+  const vals = rows.map(r => r[1]);
+  let nOot = 0, nWarn = 0;
+  vals.forEach(v => { const z = sd ? Math.abs((v - mean) / sd) : 0; if (z > 3) nOot++; else if (z > 2) nWarn++; });
+  const tile = (lab, val, col) => `<div style="background:#fafbfd;border:1px solid #eef1f5;border-radius:10px;padding:8px 13px;min-width:62px"><div style="font-size:10px;color:#8a94a6;margin-bottom:2px">${lab}</div><div style="font-family:${MONO};font-size:14.5px;font-weight:600;color:${col || '#27303f'}">${val}</div></div>`;
+  const strip = `<div style="display:flex;gap:9px;flex-wrap:wrap;margin:14px 0 4px">
+    ${tile('평균 μ', fmt(mean, mean != null && mean < 10 ? 3 : 2))}
+    ${tile('표준편차 σ', fmt(sd, sd != null && sd < 10 ? 3 : 2), '#6d28d9')}
+    ${tile('최소값', fmt(vals.length ? Math.min(...vals) : null, 2))}
+    ${tile('최대값', fmt(vals.length ? Math.max(...vals) : null, 2))}
+    ${tile('LOT 수', rows.length)}
+    ${tile('주의(2~3σ)', nWarn, nWarn ? '#b45309' : '#27303f')}
+    ${tile('관리이탈(3σ↑)', nOot, nOot ? '#b91c1c' : '#27303f')}</div>`;
+  const legend = `<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px;font-size:11.5px;color:#5b6573">
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#2a78d6"></span>정상 ±2σ</span>
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#eda100"></span>주의 2~3σ</span>
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#d03b3b"></span>관리이탈 3σ↑</span>
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px solid #888"></span>중심선 μ</span>
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px dashed #eda100"></span>±2σ</span>
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px dotted #7c6fdd"></span>±3σ</span></div>`;
+  return `<div style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:18px 22px;margin-top:18px">
+    ${sel}${strip}${legend}
+    <div id="oot-comp-chart" style="min-height:360px"></div></div>`;
+}
+
+function buildOotCompPlotly() {
+  const { rows, mean, sd } = ootCompData(S.ootComp);
+  if (!rows.length || !sd) return null;
+  const labels = rows.map(r => String(r[0])), vals = rows.map(r => r[1]);
+  const colors = vals.map(v => { const z = Math.abs((v - mean) / sd); return z > 3 ? '#d03b3b' : z > 2 ? '#eda100' : '#2a78d6'; });
+  const flat = y => labels.map(() => y);
+  const lim = (y, c, d) => ({ x: labels, y: flat(y), mode: 'lines', line: { color: c, width: 1.4, dash: d }, hoverinfo: 'skip', showlegend: false, type: 'scatter' });
+  const data = [
+    lim(mean + 3 * sd, '#7c6fdd', 'dot'), lim(mean - 3 * sd, '#7c6fdd', 'dot'),
+    lim(mean + 2 * sd, '#eda100', 'dash'), lim(mean - 2 * sd, '#eda100', 'dash'),
+    lim(mean, '#888', 'solid'),
+    { x: labels, y: vals, mode: 'markers', marker: { color: colors, size: 9, line: { color: '#fff', width: 1.2 } }, showlegend: false, type: 'scatter',
+      hovertemplate: rows.map(r => { const z = ((r[1] - mean) / sd).toFixed(2); const s = Math.abs(z) > 3 ? '관리이탈' : Math.abs(z) > 2 ? '주의' : '정상'; return `LOT ${r[0]}<br>결과값 ${r[1]} (z=${z}, ${s})<extra></extra>`; }) },
+  ];
+  const layout = { height: 360, margin: { l: 48, r: 16, t: 12, b: 54 }, xaxis: { title: '제조번호 (LOT)', type: 'category', tickangle: -45, tickfont: { size: 10 }, gridcolor: '#f5f6f9' }, yaxis: { title: '결과값', gridcolor: '#eef1f5', zeroline: false }, plot_bgcolor: '#fff', paper_bgcolor: '#fff', font: { family: 'Pretendard Variable, sans-serif', size: 11 }, hovermode: 'closest' };
+  return { data, layout, config: { displayModeBar: false, responsive: true } };
+}
+
+function renderOotCompChart() {
+  if (S.nav !== 'oot' || !S.ootComp || !window.Plotly) return;
+  const el = document.getElementById('oot-comp-chart');
+  if (!el) return;
+  const fig = isStabType(S.ootTestType) ? buildOotStabPlotly() : buildOotCompPlotly();
+  if (fig) window.Plotly.newPlot(el, fig.data, fig.layout, fig.config);
 }
 
 function ootPage() {
@@ -252,6 +513,7 @@ function ootPage() {
       </div>
       <div id="oot-lot-section" style="border-top:1px solid #eef1f5;background:#fafbfd;padding:16px 22px;border-radius:0 0 16px 16px">${ootLotControls()}</div>
     </div>
+    <div id="oot-comp-section">${ootCompSection()}</div>
     <div style="display:flex;gap:18px;margin-top:18px;align-items:flex-start;flex-wrap:wrap">
       <div id="oot-results" style="flex:1 1 580px;min-width:340px">${ootResults()}</div>
       ${ootRail()}
@@ -354,18 +616,14 @@ function buildPlotly(A) {
     data.push({ x: [0, x1], y: [b.intercept, b.intercept + b.slope * x1], mode: 'lines', line: { color: b.color, width: 2 }, name: '배치 ' + b.batch, legendgroup: b.batch, hoverinfo: 'skip', type: 'scatter' });
   });
   A.batches.forEach(b => {
-    data.push({ x: b.pts.map(p => p[0]), y: b.pts.map(p => p[1]), mode: 'markers', marker: { color: b.color, size: 9, line: { color: '#fff', width: 1.5 } }, name: '배치 ' + b.batch, legendgroup: b.batch, showlegend: false, type: 'scatter', hovertemplate: `배치 ${b.batch}<br>%{x}개월 · 함량 %{y}<extra></extra>` });
-    if (b.se) {
-      const rx = [], ry = [], rc = [];
-      b.pts.forEach(p => { const resid = Math.abs(p[1] - (b.intercept + b.slope * p[0])) / b.se; if (resid > 2) { rx.push(p[0]); ry.push(p[1]); rc.push(resid > 3 ? '#dc2626' : '#e67e22'); } });
-      if (rx.length) data.push({ x: rx, y: ry, mode: 'markers', marker: { size: 16, color: 'rgba(0,0,0,0)', line: { color: rc, width: 2.4 } }, showlegend: false, hoverinfo: 'skip', type: 'scatter' });
-    }
+    data.push({ x: b.pts.map(p => p[0]), y: b.pts.map(p => p[1]), mode: 'markers+text', text: b.pts.map(p => fmt(p[1], 1)), textposition: 'top center', textfont: { size: 10, color: '#46536a' }, marker: { color: b.color, size: 9, line: { color: '#fff', width: 1.5 } }, name: '배치 ' + b.batch, legendgroup: b.batch, showlegend: false, type: 'scatter', hovertemplate: `배치 ${b.batch}<br>%{x}개월 · 함량 %{y}<extra></extra>` });
   });
   const shapes = [], annotations = [];
   if (specLow != null) { shapes.push({ type: 'line', x0: 0, x1: xMax, y0: specLow, y1: specLow, line: { color: '#dc2626', width: 1.5, dash: 'dash' } }); annotations.push({ x: xMax, y: specLow, xanchor: 'right', yanchor: 'bottom', text: '규격하한 ' + specLow, showarrow: false, font: { size: 10, color: '#dc2626' } }); }
   if (worst && worst.shelf != null) { shapes.push({ type: 'line', x0: worst.shelf, x1: worst.shelf, y0: yMin, y1: yMax, line: { color: '#16a34a', width: 1.5, dash: 'dot' } }); annotations.push({ x: worst.shelf, y: yMax, yanchor: 'top', text: worst.shelf.toFixed(1) + '개월', showarrow: false, font: { size: 10, color: '#16a34a' } }); }
   if (approved > 0 && approved <= xMax) { shapes.push({ type: 'line', x0: approved, x1: approved, y0: yMin, y1: yMax, line: { color: '#d97706', width: 1.5, dash: 'dash' } }); annotations.push({ x: approved, y: yMax, yanchor: 'top', text: '허가 ' + approved + '개월', showarrow: false, font: { size: 10, color: '#b45309' } }); }
-  const layout = { height: 400, margin: { l: 46, r: 20, t: 26, b: 42 }, xaxis: { title: '시점 (개월)', tickvals: ticks, range: [0, xMax], gridcolor: '#f0f2f6', zeroline: false }, yaxis: { title: '함량(%)', range: [yMin, yMax], gridcolor: '#eef1f5', zeroline: false }, shapes, annotations, legend: { orientation: 'h', y: -0.2 }, plot_bgcolor: '#fff', paper_bgcolor: '#fff', font: { family: 'Pretendard Variable, sans-serif', size: 11 }, hovermode: 'closest' };
+  const yTitle = '함량 (' + (A.unit || '%') + ')';
+  const layout = { height: 400, margin: { l: 46, r: 20, t: 26, b: 42 }, xaxis: { title: '시점 (개월)', tickvals: ticks, range: [0, xMax], gridcolor: '#f0f2f6', zeroline: false }, yaxis: { title: yTitle, range: [yMin, yMax], gridcolor: '#eef1f5', zeroline: false }, shapes, annotations, legend: { orientation: 'h', y: -0.2 }, plot_bgcolor: '#fff', paper_bgcolor: '#fff', font: { family: 'Pretendard Variable, sans-serif', size: 11 }, hovermode: 'closest' };
   return { data, layout, config: { displayModeBar: false, responsive: true } };
 }
 
@@ -374,7 +632,7 @@ function renderStabChart() {
   const el = document.getElementById('stab-chart');
   if (!el) return;
   const fig = buildPlotly(S.stabData);
-  if (fig) window.Plotly.newPlot(el, fig.data, fig.layout, fig.config);
+  if (fig) { el.innerHTML = ''; window.Plotly.newPlot(el, fig.data, fig.layout, fig.config); }
 }
 
 function stepsDetails(b) {
@@ -445,8 +703,8 @@ function stabRawTable() {
   const xlsParams = new URLSearchParams({ code: S.stabCode, test_type: S.stabTestType, spec_low: S.specLow || '90', spec_high: S.specHigh || '150' });
   if (S.stabBatch) xlsParams.set('batch', S.stabBatch);
   const xlsUrl = `/api/stability/excel?` + xlsParams;
-  return `<details style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:18px 22px;margin-top:18px">
-    <summary style="cursor:pointer;font-size:14.5px;font-weight:700;user-select:none;display:flex;align-items:center;gap:9px">📄 원자료 <span style="font-size:11.5px;font-weight:500;color:#9aa4b4">분석 입력 데이터 ${t.raw.length}행 (0개월=완제품 출하 포함)</span>
+  return `<details open style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:18px 22px;margin-top:18px">
+    <summary style="cursor:pointer;font-size:14.5px;font-weight:700;user-select:none;display:flex;align-items:center;gap:9px">📄 조회된 데이터 (원자료) <span style="font-size:11.5px;font-weight:500;color:#9aa4b4">분석 입력 데이터 ${t.raw.length}행 (0개월=완제품 출하 포함)</span>
       <a href="${xlsUrl}" style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border:1.5px solid #E5310F;border-radius:9px;background:#fff;color:#E5310F;font-size:12px;font-weight:600;text-decoration:none" onclick="event.stopPropagation()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#E5310F" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><path d="M7 10l5 5 5-5"></path><path d="M12 15V3"></path></svg>Excel 다운로드</a></summary>
     <div style="border:1px solid #e7ebf1;border-radius:12px;overflow:hidden;margin-top:12px;max-height:420px;overflow-y:auto">
       <div style="display:grid;grid-template-columns:.9fr 1.8fr 1fr .8fr .9fr .9fr .9fr;background:#f5f7fa;border-bottom:1px solid #e7ebf1;font-size:11px;font-weight:600;color:#8a94a6;position:sticky;top:0">
@@ -480,11 +738,13 @@ function stabPage() {
       <div style="flex:1 1 320px;min-width:240px"><span style="font-size:11px;font-weight:600;color:#8a94a6;margin-bottom:7px;display:block">품목</span>
         <div style="position:relative"><select data-act="stabProduct" style="width:100%;padding:11px 36px 11px 13px;border:1px solid #d7dce4;border-radius:10px;font-size:13.5px;font-weight:600;color:#27303f;background:#fff;appearance:none;cursor:pointer">${prodOptions || '<option>로딩…</option>'}</select>
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9aa4b4" stroke-width="2.2" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);pointer-events:none"><path d="m6 9 6 6 6-6"></path></svg></div></div>
-      <div style="flex:0 0 auto"><span style="font-size:11px;font-weight:600;color:#8a94a6;margin-bottom:7px;display:block">함량 규격 (%)</span>
-        <div style="display:flex;align-items:center;gap:8px">
+      <div style="flex:0 0 auto"><span style="font-size:11px;font-weight:600;color:#8a94a6;margin-bottom:7px;display:block">함량 규격 (자동)</span>
+        ${A && A.ok
+          ? `<div style="display:flex;align-items:center;height:42px;padding:0 16px;border:1px solid #e7ebf1;border-radius:10px;background:#f5f7fa;font-family:${MONO};font-size:13.5px;font-weight:600;color:#27303f;white-space:nowrap">${esc(A.specText || '—')}</div>`
+          : `<div style="display:flex;align-items:center;gap:8px">
           <input data-act="specLow" value="${esc(S.specLow)}" style="width:72px;padding:10px 11px;border:1px solid #d7dce4;border-radius:10px;font-size:13.5px;font-family:${MONO};text-align:center;outline:none">
           <span style="color:#b8c0cc;font-weight:600">~</span>
-          <input data-act="specHigh" value="${esc(S.specHigh)}" style="width:72px;padding:10px 11px;border:1px solid #d7dce4;border-radius:10px;font-size:13.5px;font-family:${MONO};text-align:center;outline:none"></div></div>
+          <input data-act="specHigh" value="${esc(S.specHigh)}" style="width:72px;padding:10px 11px;border:1px solid #d7dce4;border-radius:10px;font-size:13.5px;font-family:${MONO};text-align:center;outline:none"></div>`}</div>
     </div>
     <div style="border-top:1px solid #eef1f5;background:#fafbfd;padding:14px 22px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
       <span style="font-size:11px;font-weight:600;color:#8a94a6">분석 방식</span>
@@ -572,7 +832,7 @@ function stabPage() {
 
   const chartBlock = `<div style="display:flex;gap:18px;margin-top:18px;align-items:flex-start;flex-wrap:wrap">
     <div style="flex:1 1 600px;min-width:380px;background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:18px 20px">
-      <div style="display:flex;align-items:center;gap:9px;margin-bottom:6px;flex-wrap:wrap"><span style="font-size:14.5px;font-weight:700">배치별 저장수명도</span><span style="font-size:11.5px;color:#9aa4b4">함량(%) vs 시점(개월) · 적합선 + 95% CI + 규격 + 유효기간</span></div>
+      <div style="display:flex;align-items:center;gap:9px;margin-bottom:6px;flex-wrap:wrap"><span style="font-size:14.5px;font-weight:700">배치별 저장수명도</span><span style="font-size:11.5px;color:#9aa4b4">함량(${esc(A.unit || '%')}) vs 시점(개월) · 적합선 + 95% CI + 규격 + 유효기간 · 각 점 = 시점별 결과값${S.stabBatch ? ' · 배치 ' + esc(S.stabBatch) : ''}</span></div>
       <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px">${legend}<div style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:0;border-top:2px dashed #dc2626"></span><span style="font-size:11.5px;color:#5b6573">규격하한</span></div><div style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:0;border-top:2px dotted #16a34a"></span><span style="font-size:11.5px;color:#5b6573">추정 유효기간</span></div>${A.approvedMonths != null ? `<div style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:0;border-top:2px dashed #d97706"></span><span style="font-size:11.5px;color:#5b6573">허가 유효기간</span></div>` : ''}</div>
       <div id="stab-chart" style="min-height:380px">${buildChartSVG(A)}</div></div>
     <aside style="flex:1 1 330px;min-width:300px;display:flex;flex-direction:column;gap:14px">${batchCards}</aside></div>`;
@@ -608,7 +868,7 @@ function stabPage() {
     본 결과는 자동 산출 참고값입니다. 최종 유효기간은 QC 책임자 검토·승인 및 ICH Q1A/Q1E·사내 SOP 확인이 필요합니다. 규격하한/상한이 데이터에 없을 경우 수동 입력값(기본 90/150)을 사용합니다.</div>`;
 
   const subInfo = `<span style="font-size:11.5px;color:#9aa4b4;font-family:${MONO};margin-left:auto">시험항목 ${esc(A.testItem)} · 배치 ${A.batchCount} · 시점쌍 ${A.pairCount}</span>`;
-  return `<div style="padding:26px 30px 60px;max-width:1320px;width:100%">${head}${control}${banner}${ancovaPanel}${chartBlock}${stabComparisonTable()}${stabSummaryTable()}${tpTable}${stabRawTable()}${footer}</div>`;
+  return `<div style="padding:26px 30px 60px;max-width:1320px;width:100%">${head}${control}${banner}${ancovaPanel}${chartBlock}${stabSummaryTable()}${stabRawTable()}${footer}</div>`;
 }
 
 /* ============================ ALARM PAGE ============================ */
@@ -696,8 +956,9 @@ function bindInputs() {
       S.query = e.target.value; S.open = true;
       // 검색어가 선택된 품목과 더이상 일치하지 않으면 선택 해제(품목명·LOT·결과 동기화)
       if (S.code && S.query !== `${S.code}  ${S.productName}`) {
-        S.code = null; S.productName = ''; S.lot = null; S.lotSummary = null; S.years = ['전체']; S.yearFilter = '전체'; S.lotQuery = '';
+        S.code = null; S.productName = ''; S.lot = null; S.lotSummary = null; S.years = ['전체']; S.yearFilter = '전체'; S.lotQuery = ''; S.ootComp = null;
         const pn = $('#oot-pname'); if (pn) { pn.textContent = '품목코드 선택 시 표시'; pn.style.color = '#b8c0cc'; }
+        const cs = $('#oot-comp-section'); if (cs) cs.innerHTML = '';
         const ls = $('#oot-lot-section'); if (ls) ls.innerHTML = ootLotControls();
         const rs = $('#oot-results'); if (rs) rs.innerHTML = ootResults();
       }
@@ -718,6 +979,8 @@ function bindInputs() {
   const pwNew = $('#pw-new');
   if (pwNew) pwNew.addEventListener('keydown', e => { if (e.key === 'Enter') changePw(); });
   renderStabChart();   // Plotly 인터랙티브 차트(가능 시 SVG 대체)
+  renderOotCompChart();   // OOT 성분별 LOT 관리도
+  loadOotStab();   // 안정성 시험종류일 때 시점별 데이터 로드
 }
 
 document.addEventListener('mousedown', e => {
@@ -757,7 +1020,8 @@ document.addEventListener('click', async e => {
 document.addEventListener('change', e => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
-  if (el.dataset.act === 'ootTestType') { S.ootTestType = el.value; S.code = null; S.productName = ''; S.lot = null; S.lotSummary = null; S.query = ''; loadOotProducts(); }
+  if (el.dataset.act === 'ootComp') { S.ootComp = el.value || null; render(); }
+  else if (el.dataset.act === 'ootTestType') { S.ootTestType = el.value; S.code = null; S.productName = ''; S.lot = null; S.lotSummary = null; S.query = ''; S.ootComp = null; loadOotProducts(); }
   else if (el.dataset.act === 'stabTestType') { S.stabTestType = el.value; S.stabCode = null; S.stabData = null; S.stabBatch = null; S.stabFromOot = false; loadStabProducts(); }
   else if (el.dataset.act === 'stabProduct') { S.stabCode = el.value; S.stabTestItem = null; S.stabFromOot = false; S.stabBatch = null; loadStability(); }
   else if (el.dataset.act === 'testItem') { S.stabTestItem = el.value; loadStability(); }
@@ -780,7 +1044,7 @@ async function loadOotProducts() {
   render();
 }
 async function pickProduct(code, name) {
-  S.code = code; S.productName = name; S.query = `${code}  ${name}`; S.open = false; S.lot = null; S.yearFilter = '전체'; S.lotQuery = '';
+  S.code = code; S.productName = name; S.query = `${code}  ${name}`; S.open = false; S.lot = null; S.yearFilter = '전체'; S.lotQuery = ''; S.ootComp = null;
   render();
   try { S.lotSummary = await getJSON(`/api/oot/lots?code=${encodeURIComponent(code)}&test_type=${encodeURIComponent(S.ootTestType)}`); S.years = S.lotSummary.years; }
   catch (e) { S.lotSummary = { lots: [], years: ['전체'] }; S.years = ['전체']; }
