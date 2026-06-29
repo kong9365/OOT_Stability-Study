@@ -1,0 +1,29 @@
+# 비밀값·로컬 설정 — 절대 커밋 금지
+.env
+.env.local
+
+# 런타임 생성 파일
+oot_alert_config.json
+.webapp_alarm.json
+oot_alarm_sent.csv
+.oot_alarm_state.json
+.oot_snapshot.csv
+*.log
+
+# 파이썬
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# OS / 에디터
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 데이터·산출물
+*.xlsx
+*.xls
