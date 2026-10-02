@@ -1,0 +1,3 @@
+cd "C:\Users\user\Desktop\Coding\cusor\Tableau Custom MCP Server"
+set OPENBLAS_NUM_THREADS=1
+streamlit run tableau_dashboard.py

@@ -1,0 +1,22 @@
+# === 빌드 산출물 ===
+__pycache__/
+*.pyc
+
+# === 비밀번호/자격증명 (절대 커밋 금지) ===
+.env
+network_gate.json
+network_gate.json.bak_*
+*.bak_*
+
+# === 직원 개인정보 / 수신자 명단 ===
+recipients_db.json
+oot_alert_config.json
+
+# === 실데이터·운영 로그/캐시 (실제 품질·시험 데이터 포함 가능) ===
+.oot_alarm_state.json
+oot_alarm_sent.csv
+oot_alarm.log
+watchdog.log
+.kdp_data_cache.pkl.gz
+sample_OOT_report.xlsx
+*.log
