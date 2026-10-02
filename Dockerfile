@@ -9,4 +9,4 @@ COPY . .
 RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
 RUN if [ -f pyproject.toml ]; then pip install --no-cache-dir .; fi
 EXPOSE 8502
-CMD ["sh", "-c", "python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "python -m uvicorn dashboard_api:app --host 0.0.0.0 --port ${PORT:-8502}"]
