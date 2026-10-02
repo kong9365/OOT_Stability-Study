@@ -19,3 +19,11 @@ env:
     - name: DATABRICKS_HOST
     - name: DATABRICKS_WAREHOUSE_ID
     - name: API_KEY
+    - name: QMS_SMTP_HOST
+    - name: QMS_SMTP_PORT
+    - name: QMS_SMTP_USER
+    - name: QMS_SMTP_PASS
+    - name: OOT_DASHBOARD_URL
+
+storage:
+  enabled: true

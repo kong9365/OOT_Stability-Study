@@ -16,6 +16,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
 
+import storage_io
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _QMS_DIR = os.path.normpath(os.path.join(_HERE, "..", "QMS_Integrated_Dashboard"))
 CONFIG_PATH = os.path.join(_HERE, "oot_alert_config.json")
@@ -79,12 +81,7 @@ def password_from_env() -> bool:
 
 def load_config() -> dict[str, Any]:
     cfg = dict(DEFAULT_CONFIG)
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, encoding="utf-8") as f:
-                cfg.update(json.load(f) or {})
-        except Exception:
-            pass
+    cfg.update(storage_io.read_json(CONFIG_PATH, default={}) or {})
     # 환경변수 폴백
     if not cfg.get("recipients"):
         env_to = os.environ.get("QMS_ALERT_TO", "")
@@ -93,20 +90,13 @@ def load_config() -> dict[str, Any]:
 
 
 def save_config(cfg: dict[str, Any]) -> None:
-    """기존 파일과 병합 저장 — 부분 저장 시 미포함 키(예: password_hash) 보존."""
-    existing: dict[str, Any] = {}
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, encoding="utf-8") as f:
-                existing = json.load(f) or {}
-        except Exception:
-            existing = {}
+    """기존 저장본과 병합 저장 — 부분 저장 시 미포함 키(예: password_hash) 보존."""
+    existing = storage_io.read_json(CONFIG_PATH, default={}) or {}
     merged = dict(DEFAULT_CONFIG)
     merged.update(existing)
     merged.update({k: v for k, v in cfg.items() if k in DEFAULT_CONFIG})
     keep = {k: merged.get(k, DEFAULT_CONFIG[k]) for k in DEFAULT_CONFIG}
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(keep, f, ensure_ascii=False, indent=2)
+    storage_io.write_json(CONFIG_PATH, keep)
 
 
 def _smtp_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -157,18 +147,20 @@ def alert_id(rec: dict) -> str:
 def log_sent(records: list[dict], to_addrs: list[str]) -> None:
     """발송된 건을 oot_alarm_sent.csv 에 누적 기록(감사·추적)."""
     import csv as _csv
+    import io as _io
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    is_new = not os.path.exists(SENT_LOG_PATH)
-    with open(SENT_LOG_PATH, "a", encoding="utf-8-sig", newline="") as f:
-        w = _csv.writer(f)
-        if is_new:
-            w.writerow(["발송일시", "알림ID", "시험종류", "품목", "품목코드", "제조번호",
-                        "시험항목", "결과값", "평균", "표준편차", "분류", "수신자"])
-        for r in records:
-            w.writerow([now, alert_id(r), r.get("시험종류", ""), r.get("품목", ""),
-                        r.get("품목코드", ""), r.get("제조번호", ""), r.get("시험항목", ""),
-                        r.get("결과값", ""), r.get("평균", ""), r.get("표준편차", ""),
-                        r.get("분류", ""), "; ".join(to_addrs)])
+    is_new = not storage_io.exists(SENT_LOG_PATH)
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    if is_new:
+        w.writerow(["발송일시", "알림ID", "시험종류", "품목", "품목코드", "제조번호",
+                    "시험항목", "결과값", "평균", "표준편차", "분류", "수신자"])
+    for r in records:
+        w.writerow([now, alert_id(r), r.get("시험종류", ""), r.get("품목", ""),
+                    r.get("품목코드", ""), r.get("제조번호", ""), r.get("시험항목", ""),
+                    r.get("결과값", ""), r.get("평균", ""), r.get("표준편차", ""),
+                    r.get("분류", ""), "; ".join(to_addrs)])
+    storage_io.append_text(SENT_LOG_PATH, buf.getvalue(), encoding="utf-8-sig")
 
 
 def build_oot_email_html(records: list[dict], dashboard_url: str = "") -> str:

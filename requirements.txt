@@ -17,3 +17,5 @@ truststore>=0.8.0
 # (선택) api.py 프록시도 쓸 경우
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
+# axhub 영속 스토리지(S3 호환) 연동(storage_io.py)
+boto3>=1.34.0

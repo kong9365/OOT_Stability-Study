@@ -6,12 +6,13 @@ APQR 관점: 코드가 다른 동일 제품을 하나로 합쳐(pooling) 관리�
 """
 from __future__ import annotations
 
-import json
 import statistics
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
+
+import storage_io
 
 
 # --------------------------------------------------------------------------
@@ -62,9 +63,7 @@ class GroupStore:
         self.path = Path(path)
 
     def _read(self) -> dict:
-        if not self.path.exists():
-            return {}
-        return json.loads(self.path.read_text(encoding="utf-8"))
+        return storage_io.read_json(self.path, default={}) or {}
 
     def save_group(self, group_id: str, group_name: str, member_codes: list[str]) -> ItemGroup:
         data = self._read()
@@ -76,7 +75,7 @@ class GroupStore:
                 updated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
         )
-        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        storage_io.write_json(self.path, data)
         return ItemGroup(**data[group_id])
 
     def load_group(self, group_id: str) -> ItemGroup | None:
@@ -91,7 +90,7 @@ class GroupStore:
         if group_id not in data:
             return False
         del data[group_id]
-        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        storage_io.write_json(self.path, data)
         return True
 
 

@@ -18,7 +18,6 @@ OOT 자동 알람 스케줄러 (독립 프로세스)
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -30,6 +29,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_HERE, ".env"), override=False)
 sys.path.insert(0, _HERE)
 import kdp_core as core  # noqa: E402
+import storage_io  # noqa: E402
 import oot_mail  # noqa: E402
 
 STATE_PATH = os.path.join(_HERE, ".oot_alarm_state.json")
@@ -97,18 +97,12 @@ def _oot_status(s) -> str:
 
 
 def load_state() -> set:
-    if os.path.exists(STATE_PATH):
-        try:
-            with open(STATE_PATH, encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
+    keys = storage_io.read_json(STATE_PATH)
+    return set(keys) if keys is not None else set()
 
 
 def save_state(keys) -> None:
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(sorted(keys), f, ensure_ascii=False)
+    storage_io.write_json(STATE_PATH, sorted(keys))
 
 
 def check_once() -> None:
@@ -137,7 +131,7 @@ def check_once() -> None:
                     "결과값": r.get("LOT결과_0제외", ""), "분류": r.get("OOT_구간분류_히트맵", ""),
                     "평균": r.get("확인_평균", ""), "표준편차": r.get("확인_표준편차", "")}
 
-    first_run = not os.path.exists(STATE_PATH)
+    first_run = not storage_io.exists(STATE_PATH)
     if first_run:
         save_state(set(cur))
         _log(f"초기 기준선 설정: 현재 OOT {len(cur)}건 기록(발송 안함). 이후 신규분만 발송. "
@@ -223,8 +217,7 @@ def main():
     a = ap.parse_args()
 
     if a.reset_state:
-        if os.path.exists(STATE_PATH):
-            os.remove(STATE_PATH)
+        storage_io.remove(STATE_PATH)
         _log("발송 이력 초기화 완료 (다음 실행이 새 기준선)")
         return
     if a.once:

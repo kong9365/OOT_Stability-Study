@@ -24,6 +24,7 @@ import kdp_core as core
 import oot_group
 import oot_mail
 import recipients_db
+import storage_io
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _WEBAPP = os.path.join(_HERE, "webapp")
@@ -245,13 +246,7 @@ def api_group_excel(codes: str = Query(""), test_type: str = Query("완제품"),
 
 # ── 알림 설정 ──────────────────────────────────────────────────────────────────
 def _load_prefs() -> dict:
-    if os.path.exists(_ALARM_PREFS):
-        try:
-            with open(_ALARM_PREFS, encoding="utf-8") as f:
-                return json.load(f) or {}
-        except Exception:
-            return {}
-    return {}
+    return storage_io.read_json(_ALARM_PREFS, default={}) or {}
 
 
 class AlarmConfig(BaseModel):
@@ -316,8 +311,7 @@ def api_alarm_set(body: AlarmConfig):
         cfg["schedule"] = _normalize_schedule(body.schedule)
     oot_mail.save_config(cfg)
     # 야간발송은 웹 환경설정(side json)에 저장
-    with open(_ALARM_PREFS, "w", encoding="utf-8") as f:
-        json.dump({"night": body.night}, f, ensure_ascii=False, indent=2)
+    storage_io.write_json(_ALARM_PREFS, {"night": body.night})
     sched = {**_DEFAULT_SCHEDULE, **(cfg.get("schedule") or {})}
     return {"ok": True, "schedule": sched, "interval": _schedule_label(sched),
             "note": "실행 스케줄은 실행 중인 알람에 1분 이내 자동 반영됩니다."}
@@ -361,19 +355,20 @@ def api_alarm_history(days: int = Query(30, ge=0, le=3650), limit: int = Query(3
 
     sent: list[dict] = []
     path = getattr(oot_mail, "SENT_LOG_PATH", os.path.join(_HERE, "oot_alarm_sent.csv"))
-    if os.path.exists(path):
-        with open(path, encoding="utf-8-sig", newline="") as f:
-            for r in _csv.DictReader(f):
-                t = (r.get("발송일시") or "").strip()
-                if not t or (cutoff and t < cutoff):
-                    continue
-                sent.append({
-                    "time": t, "id": r.get("알림ID", ""), "testType": r.get("시험종류", ""),
-                    "product": r.get("품목", ""), "code": r.get("품목코드", ""), "lot": r.get("제조번호", ""),
-                    "item": r.get("시험항목", ""), "value": r.get("결과값", ""), "mean": r.get("평균", ""),
-                    "sd": r.get("표준편차", ""), "cls": r.get("분류", ""),
-                    "recipients": [e.strip() for e in (r.get("수신자") or "").split(";") if e.strip()],
-                })
+    sent_text = storage_io.read_text(path, encoding="utf-8-sig")
+    if sent_text:
+        import io as _io
+        for r in _csv.DictReader(_io.StringIO(sent_text)):
+            t = (r.get("발송일시") or "").strip()
+            if not t or (cutoff and t < cutoff):
+                continue
+            sent.append({
+                "time": t, "id": r.get("알림ID", ""), "testType": r.get("시험종류", ""),
+                "product": r.get("품목", ""), "code": r.get("품목코드", ""), "lot": r.get("제조번호", ""),
+                "item": r.get("시험항목", ""), "value": r.get("결과값", ""), "mean": r.get("평균", ""),
+                "sd": r.get("표준편차", ""), "cls": r.get("분류", ""),
+                "recipients": [e.strip() for e in (r.get("수신자") or "").split(";") if e.strip()],
+            })
     sent.sort(key=lambda x: x["time"], reverse=True)
 
     events: list[dict] = []

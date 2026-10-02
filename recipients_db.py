@@ -10,9 +10,10 @@ recipients_db.py — 알림 수신자 마스터 DB (이름 + 이메일).
 from __future__ import annotations
 
 import glob
-import json
 import os
 import re
+
+import storage_io
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(_HERE, "recipients_db.json")
@@ -62,13 +63,9 @@ def seed_from_roster() -> list[dict]:
 
 def load_db() -> list[dict]:
     """마스터 DB 로드. 없으면 명부에서 시드(없으면 빈 목록)."""
-    if not os.path.exists(DB_PATH):
+    data = storage_io.read_json(DB_PATH)
+    if data is None:
         return seed_from_roster()
-    try:
-        with open(DB_PATH, encoding="utf-8") as f:
-            data = json.load(f) or []
-    except Exception:
-        return []
     # 정규화: name/email 키만, 이메일 중복 제거
     out, seen = [], set()
     for r in data:
@@ -81,8 +78,7 @@ def load_db() -> list[dict]:
 
 
 def save_db(db: list[dict]) -> None:
-    with open(DB_PATH, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
+    storage_io.write_json(DB_PATH, db)
 
 
 def add_recipient(name: str, email: str) -> tuple[bool, str, list[dict]]:
