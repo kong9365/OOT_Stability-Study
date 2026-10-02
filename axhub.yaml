@@ -1,0 +1,21 @@
+version: axhub/v1
+name: 광동 품질·시험 통합 대시보드
+
+runtime:
+  port: 8502
+  health_path: /api/health
+
+build:
+  framework: fastapi
+  install: pip install -r requirements.txt
+  start: python -m uvicorn dashboard_api:app --host 0.0.0.0 --port ${PORT:-8502}
+  deploy_method: docker
+
+env:
+  required:
+    - name: DATABRICKS_CLIENT_ID
+    - name: DATABRICKS_CLIENT_SECRET
+  optional:
+    - name: DATABRICKS_HOST
+    - name: DATABRICKS_WAREHOUSE_ID
+    - name: API_KEY
