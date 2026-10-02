@@ -22,8 +22,6 @@ const S = {
   histKind: 'key', histOpen: {}, histLimit: 200,
   // 수신자 마스터 DB + 시험종류별 그룹
   recipDb: [], groups: {}, recipTestTypes: [], activeTT: '완제품', recipDirty: false, dbSearch: '',
-  // PAT(개인용 액세스 토큰) 만료
-  pat: null, patCfg: { expiry: '', recipients: [] }, patName: '', patThreshold: 20, patDirty: false,
   // 동일품목군 (APQR 풀링 OOT)
   groupTestType: '완제품', groupCatalog: [], groupCatalogKey: '', groupQuery: '', groupOpen: false,
   groupMembers: [], groupItems: [], groupItem: '', groupList: [], groupName: '',
@@ -92,25 +90,10 @@ function sidebar() {
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FF8A5C" stroke-width="2.2"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>데이터 새로고침</button>
     <div style="margin-top:auto;background:#1f2128;border:1px solid #2c2f38;border-radius:12px;padding:13px 14px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span style="width:7px;height:7px;border-radius:50%;background:#34d27b;animation:pulseDot 1.8s infinite"></span><span style="font-size:12px;font-weight:600;color:#dbe3f0">알람 감시 정상</span></div>
-      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px"><span style="color:#6b7a96">데이터원</span><span style="color:#c3cee0;font-family:${MONO}">OOT_추출용</span></div>
-      <div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:#6b7a96">서버</span><span style="color:#c3cee0;font-family:${MONO}">tableau.ekdp</span></div>
-      ${patSidebarRows()}
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px"><span style="color:#6b7a96">데이터원</span><span style="color:#c3cee0;font-family:${MONO}">광동제약_gmp_lims</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:#6b7a96">서버</span><span style="color:#c3cee0;font-family:${MONO}">Databricks</span></div>
     </div>
   </aside>`;
-}
-
-/* 좌측 패널 하단 — PAT 이름·만료일·잔여일(경고 시 주황 강조) */
-function patSidebarRows() {
-  const p = S.pat;
-  if (!p || !p.expiry) return '';
-  const d = p.daysLeft;
-  const dtxt = d == null ? '—' : (p.expired ? `만료 ${Math.abs(d)}일 경과` : `D-${d}`);
-  const warn = !!p.warn;
-  const col = warn ? '#ff8a5c' : '#c3cee0';
-  return `<div style="height:1px;background:#2c2f38;margin:11px 0 9px"></div>
-    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px"><span style="color:#6b7a96">PAT</span><span style="color:#c3cee0;font-family:${MONO}">${esc(p.name || '')}</span></div>
-    <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px"><span style="color:#6b7a96">만료일</span><span style="color:#c3cee0;font-family:${MONO}">${esc(p.expiry || '—')}</span></div>
-    <div style="display:flex;justify-content:space-between;font-size:11px;align-items:center"><span style="color:#6b7a96">잔여</span><span style="color:${col};font-family:${MONO};font-weight:${warn ? '700' : '500'}">${warn ? '⚠ ' : ''}${dtxt}</span></div>`;
 }
 
 function topbar() {
@@ -391,8 +374,7 @@ function ootResults() {
         ${kpi('관리이탈', kpiVals.crit, '#dc2626')}${!stab ? kpi('경향이탈', trendN, '#7c3aed') : ''}${kpi('주의', kpiVals.warn, '#d97706')}${kpi('정상', kpiVals.normal, '#16a34a')}${kpi(lastKpi[0], lastKpi[1], lastKpi[2])}</div></div>
     <div style="display:flex;align-items:center;gap:12px;margin:13px 2px 0;flex-wrap:wrap">
       <button data-act="jumpStab" style="display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid #E5310F;border-radius:10px;background:#fff;color:#E5310F;font-size:12.5px;font-weight:600;cursor:pointer">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#E5310F" stroke-width="2"><path d="M3 3v18h18"></path><path d="m19 7-6 7-4-3-4 5"></path></svg>이 품목 안정성 분석</button>
-      <a href="${'http://tableau.ekdp.com/#/home'}" target="_blank" style="font-size:12.5px;color:#8a94a6;display:flex;align-items:center;gap:6px;text-decoration:none">상세 추이·관리도는 Tableau에서 확인<span style="color:#E5310F;font-weight:600">→</span></a></div>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#E5310F" stroke-width="2"><path d="M3 3v18h18"></path><path d="m19 7-6 7-4-3-4 5"></path></svg>이 품목 안정성 분석</button></div>
     ${sampleBanner}
     ${isStabType(S.ootTestType) ? ootStabTpTable() : ootBlock + normalItemsTable(lot)}`;
 }
@@ -408,7 +390,7 @@ function ootRail() {
       <div style="margin-top:12px;padding-top:13px;border-top:1px solid #eef1f5">
         <div style="font-size:11px;color:#8a94a6;margin-bottom:7px">발송 정책</div>
         <span style="font-size:12.5px;font-weight:600;color:#E5310F;background:#fdece8;padding:5px 11px;border-radius:8px">${esc(policyChip)}</span>
-        <div style="font-size:11px;color:#9aa4b4;margin-top:11px;line-height:1.55">신규 OOT만 발송(중복 자동 차단). 실시간성은 Tableau extract 갱신 주기에 종속됩니다.</div></div></div>
+        <div style="font-size:11px;color:#9aa4b4;margin-top:11px;line-height:1.55">신규 OOT만 발송(중복 자동 차단). 실시간성은 Databricks LIMS 적재 주기(매일 새벽)에 종속됩니다.</div></div></div>
   </aside>`;
 }
 
@@ -624,7 +606,7 @@ function ootPage() {
   const nameColor = S.productName ? '#27303f' : '#b8c0cc';
   return `<div style="padding:26px 30px 60px;max-width:1320px;width:100%">
     ${pageHeader('광동제약 · 품질·시험', 'OOT 빠른 조회', 'Out Of Trend · LOT 판정',
-      `데이터 출처: Tableau <span style="font-family:${MONO}">OOT_추출용</span> · ${esc(S.ootTestType)} 온디맨드 조회`)}
+      `데이터 출처: Databricks <span style="font-family:${MONO}">광동제약_gmp_lims</span>(LIMS 수정판) · ${esc(S.ootTestType)} 온디맨드 조회`)}
     ${stepGuide(['시험종류 선택', '품목 검색·선택', '연도 선택', 'LOT·엑셀 확인'], S.code ? (S.lot ? 3 : 2) : 1)}
     <div style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);position:relative;z-index:5">
       <div style="padding:18px 22px;display:flex;gap:22px;flex-wrap:wrap;align-items:flex-end">
@@ -876,7 +858,7 @@ function stabPage() {
   const head = `<div style="margin-bottom:20px">
     <div style="font-size:11.5px;font-weight:600;letter-spacing:.04em;color:#E5310F;margin-bottom:8px;display:flex;align-items:center;gap:9px">${eyebrow}</div>
     <h1 style="margin:0;font-size:26px;font-weight:700;letter-spacing:-.02em;display:flex;align-items:baseline;gap:11px">안정성 회귀분석<span style="color:#8a94a6;font-weight:500;font-size:15px">Shelf-life · ICH Q1E 유효기간</span></h1>
-    <div style="font-size:12.5px;color:#9aa4b4;margin-top:7px">데이터 출처: Tableau <span style="font-family:${MONO}">OOT_추출용</span> · <span style="font-family:${MONO}">의뢰 특이사항</span> → 시점(개월) · 함량 = <span style="font-family:${MONO}">LOT결과_0제외</span></div></div>`
+    <div style="font-size:12.5px;color:#9aa4b4;margin-top:7px">데이터 출처: Databricks <span style="font-family:${MONO}">광동제약_gmp_lims</span>(LIMS 수정판) · <span style="font-family:${MONO}">의뢰 특이사항</span> → 시점(개월) · 함량 = <span style="font-family:${MONO}">LOT결과_0제외</span></div></div>`
     + stepGuide(['시험종류·품목 선택', '규격·방식 설정', '결과·엑셀 확인'], (A && A.ok) ? 2 : (S.stabCode ? 1 : 0));
 
   const prodOptions = S.stabProducts.map(p => `<option value="${esc(p.code)}" ${p.code === S.stabCode ? 'selected' : ''}>${esc(p.code)}  ${esc(p.name)}</option>`).join('');
@@ -1371,7 +1353,6 @@ function alarmPage() {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8a94a6" stroke-width="2"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v5"></path><circle cx="12" cy="16" r=".6" fill="#8a94a6"></circle></svg>
         <span style="font-size:12px;color:#5b6573;line-height:1.5">중복 발송은 (품목코드·제조번호·시험항목)+분류 키의 발송 이력으로 차단됩니다.</span></div></div>
     ${recipientDbCard()}${groupEditorCard()}
-    ${patCard()}
     <div style="display:flex;gap:16px;flex-wrap:wrap">
       <div style="flex:1 1 100%;background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:20px 22px">
         <div style="font-size:13.5px;font-weight:700;margin-bottom:4px">알람 실행 주기 <span style="font-size:11.5px;font-weight:600;color:#8a94a6">(둘 중 1가지 선택)</span></div>
@@ -1687,8 +1668,6 @@ function bindInputs() {
   if (histQ) histQ.addEventListener('input', e => { S.histQ = e.target.value; S.histLimit = 200; updateHistPanel(); });
   const dbEmail = $('#db-email');
   if (dbEmail) dbEmail.addEventListener('keydown', e => { if (e.key === 'Enter') addDbRecip(); });
-  const patExp = document.querySelector('[data-act="patExpiry"]');
-  if (patExp) patExp.addEventListener('change', e => { S.patCfg.expiry = e.target.value; S.patDirty = true; const s = $('#pat-status'); if (s) { s.textContent = '● 미저장'; s.style.color = '#b45309'; } });
   const grpSearch = $('#group-search');
   if (grpSearch) {
     grpSearch.addEventListener('input', e => { S.groupQuery = e.target.value; S.groupOpen = true; const d = $('#group-dropdown'); if (d) d.innerHTML = groupDropdown(); });
@@ -1748,8 +1727,6 @@ document.addEventListener('click', async e => {
   else if (act === 'selectTT') { S.activeTT = el.dataset.tt; render(); }
   else if (act === 'toggleMember') { toggleMember(el.dataset.email); }
   else if (act === 'saveGroups') { saveGroups(); }
-  else if (act === 'togglePatRecip') { togglePatRecip(el.dataset.email); }
-  else if (act === 'savePat') { savePat(); }
   else if (act === 'grpAdd') { grpAddMember(el.dataset.code, el.dataset.name); }
   else if (act === 'grpRemove') { grpRemoveMember(el.dataset.code); }
   else if (act === 'grpSave') { grpSave(); }
@@ -1851,13 +1828,7 @@ async function loadAlarm() {
     S.groups = g.groups || {}; S.recipTestTypes = g.testTypes || []; S.recipDb = g.recipients || [];
     if ((!S.activeTT || !S.recipTestTypes.includes(S.activeTT)) && S.recipTestTypes.length) S.activeTT = S.recipTestTypes[0];
   } catch (e) {}
-  try {
-    const pc = await getJSON('/api/pat/config');
-    S.patCfg = { expiry: pc.expiry || '', recipients: pc.recipients || [] };
-    S.patName = pc.name || ''; S.patThreshold = pc.thresholdDays || 20;
-    if (pc.recipientsDb && pc.recipientsDb.length) S.recipDb = pc.recipientsDb;
-  } catch (e) {}
-  S.alarmDirty = false; S.recipDirty = false; S.patDirty = false;
+  S.alarmDirty = false; S.recipDirty = false;
   render();
 }
 async function addDbRecip() {
@@ -1930,97 +1901,6 @@ async function changePw() {
   } catch (e) { if (msg) { msg.textContent = '변경 실패: ' + e.message; msg.style.color = '#dc2626'; } }
 }
 
-/* ===================== PAT 만료(좌측패널·팝업·설정) ===================== */
-let patPopupShown = false;   // 접속(페이지 로드)당 1회만 팝업
-
-async function loadPatInfo() {
-  try {
-    const p = await getJSON('/api/pat/info');
-    S.pat = p; render();
-    if (p && p.warn && !patPopupShown) { patPopupShown = true; showPatModal(p); }
-  } catch (e) {}
-}
-
-function showPatModal(p) {
-  const old = document.getElementById('pat-modal'); if (old) old.remove();
-  const d = p.daysLeft;
-  const msg = p.message || (p.expired ? `PAT가 만료되었습니다(${Math.abs(d)}일 경과).`
-    : `PAT 만료 ${d}일 전입니다.`);
-  const accent = p.expired ? '#b91c1c' : '#E5310F';
-  const dtxt = d == null ? '—' : (p.expired ? `만료 ${Math.abs(d)}일 경과` : `D-${d}`);
-  const wrap = document.createElement('div');
-  wrap.id = 'pat-modal';
-  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(15,20,30,.55);display:flex;align-items:center;justify-content:center;z-index:9999;font-family:inherit';
-  wrap.innerHTML = `<div style="background:#fff;border-radius:16px;max-width:440px;width:90%;box-shadow:0 24px 70px rgba(0,0,0,.34);overflow:hidden">
-    <div style="background:${accent};color:#fff;padding:17px 22px;display:flex;align-items:center;gap:11px">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.1"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
-      <div style="font-size:15px;font-weight:700">Tableau PAT 만료 안내</div></div>
-    <div style="padding:22px">
-      <div style="font-size:14.5px;font-weight:600;color:#1a2230;line-height:1.5">${esc(msg)}</div>
-      <div style="font-size:13px;color:#5b6573;margin-top:8px;line-height:1.6">Tableau 설정창에서 <b>PAT 신규발급 및 갱신</b> 후, 알림 설정의 PAT 만료일을 새 토큰 기준으로 업데이트하세요.</div>
-      <div style="margin-top:15px;background:#f8fafc;border:1px solid #eef1f5;border-radius:11px;padding:13px 15px;font-size:12.5px;color:#46536a;display:flex;flex-direction:column;gap:7px">
-        <div style="display:flex;justify-content:space-between"><span style="color:#8a94a6">토큰 이름</span><b style="font-family:${MONO}">${esc(p.name || '')}</b></div>
-        <div style="display:flex;justify-content:space-between"><span style="color:#8a94a6">만료일</span><b style="font-family:${MONO}">${esc(p.expiry || '—')}</b></div>
-        <div style="display:flex;justify-content:space-between"><span style="color:#8a94a6">잔여</span><b style="font-family:${MONO};color:${accent}">${dtxt}</b></div></div>
-      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px">
-        <button id="pat-modal-settings" style="padding:9px 16px;border:1px solid #d7dce4;border-radius:10px;background:#fff;color:#46536a;font-size:13px;font-weight:600;cursor:pointer">알림 설정 열기</button>
-        <button id="pat-modal-close" style="padding:9px 20px;border:none;border-radius:10px;background:${accent};color:#fff;font-size:13px;font-weight:600;cursor:pointer">확인</button></div>
-    </div></div>`;
-  document.body.appendChild(wrap);
-  const close = () => wrap.remove();
-  wrap.querySelector('#pat-modal-close').addEventListener('click', close);
-  wrap.querySelector('#pat-modal-settings').addEventListener('click', () => { close(); S.nav = 'alarm'; S.alarmAuthed = false; render(); loadAlarm(); });
-  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
-}
-
-/* 설정 — PAT 만료일·수신자 카드 */
-function patCard() {
-  const c = S.patCfg || { expiry: '', recipients: [] };
-  const db = S.recipDb || [];
-  const sel = (c.recipients || []).map(e => String(e).toLowerCase());
-  const chips = db.length ? db.map(r => {
-    const on = sel.includes(String(r.email).toLowerCase());
-    return `<button data-act="togglePatRecip" data-email="${esc(r.email)}" style="display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border-radius:999px;cursor:pointer;font-size:12px;font-weight:600;border:1px solid ${on ? '#E5310F' : '#e0e5ec'};background:${on ? '#E5310F' : '#fff'};color:${on ? '#fff' : '#46536a'}">${on ? '✓ ' : ''}${esc(r.name || r.email)}</button>`;
-  }).join('') : `<span style="font-size:12.5px;color:#9aa4b4">수신자 DB가 비어 있습니다(위 수신자 마스터 DB에서 먼저 등록).</span>`;
-  return `<div style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:20px 22px;margin-bottom:16px">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#E5310F" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-      <div style="font-size:13.5px;font-weight:700">Tableau PAT 만료 알림</div></div>
-    <div style="font-size:12px;color:#9aa4b4;margin-bottom:15px;line-height:1.55">Tableau API는 만료일을 제공하지 않아 직접 입력합니다. 잔여 ${esc(S.patThreshold || 20)}일부터 접속 시 팝업 안내 + 아래 수신자에게 메일(일 1회) 발송.</div>
-    <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;margin-bottom:16px">
-      <div><div style="font-size:11.5px;font-weight:600;color:#5b6573;margin-bottom:6px">토큰 이름</div>
-        <div style="padding:9px 13px;border:1px solid #eef1f5;border-radius:10px;background:#f8fafc;font-size:13px;font-family:${MONO};min-width:120px">${esc(S.patName || S.pat && S.pat.name || '—')}</div></div>
-      <div><div style="font-size:11.5px;font-weight:600;color:#5b6573;margin-bottom:6px">만료일</div>
-        <input data-act="patExpiry" type="date" value="${esc((c.expiry || '').slice(0, 10))}" style="padding:9px 12px;border:1px solid #d7dce4;border-radius:10px;font-size:13px;font-family:${MONO};outline:none"></div>
-      <button data-act="savePat" style="display:flex;align-items:center;gap:7px;padding:9px 16px;border:none;border-radius:10px;background:#E5310F;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><path d="M17 21v-8H7v8"></path><path d="M7 3v5h8"></path></svg>PAT 설정 저장</button>
-      <span id="pat-status" style="font-size:12px;font-weight:600;color:${S.patDirty ? '#b45309' : '#9aa4b4'}">${S.patDirty ? '● 미저장' : ''}</span></div>
-    <div style="font-size:11.5px;font-weight:600;color:#5b6573;margin-bottom:9px">PAT 만료 수신자 <span style="color:#9aa4b4;font-weight:500">(마스터 DB에서 선택)</span></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">${chips}</div></div>`;
-}
-
-async function savePat() {
-  const s = $('#pat-status');
-  try {
-    const r = await postJSON('/api/pat/config', { expiry: (S.patCfg.expiry || ''), recipients: S.patCfg.recipients || [] });
-    if (r.ok) {
-      S.patCfg = { expiry: r.expiry || '', recipients: r.recipients || [] };
-      S.patDirty = false;
-      if (r.info) { S.pat = Object.assign({}, S.pat, r.info); }
-      render();
-      const s2 = $('#pat-status'); if (s2) { s2.textContent = '✓ 저장됨'; s2.style.color = '#15803d'; }
-    } else if (s) { s.textContent = r.detail || '저장 실패'; s.style.color = '#dc2626'; }
-  } catch (e) { if (s) { s.textContent = '저장 실패: ' + e.message; s.style.color = '#dc2626'; } }
-}
-
-function togglePatRecip(email) {
-  const list = (S.patCfg.recipients || []).slice();
-  const em = String(email).toLowerCase();
-  const i = list.findIndex(x => String(x).toLowerCase() === em);
-  if (i >= 0) list.splice(i, 1); else list.push(email);
-  S.patCfg.recipients = list; S.patDirty = true; render();
-}
-
 /* ============================ INIT ============================ */
 loadOotProducts();
-loadPatInfo();
 getJSON('/api/alarm/config').then(c => { S.alarm = c; if (S.nav === 'oot') render(); }).catch(() => {});

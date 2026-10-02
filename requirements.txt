@@ -11,6 +11,9 @@ pillow>=10.0
 httpx>=0.27.0
 python-dotenv>=1.0.0
 urllib3>=2.0.0
+# Databricks SQL Statement Execution API 연동(databricks_client.py)
+requests>=2.31.0
+truststore>=0.8.0
 # (선택) api.py 프록시도 쓸 경우
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0

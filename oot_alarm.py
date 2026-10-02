@@ -2,8 +2,9 @@
 """
 OOT 자동 알람 스케줄러 (독립 프로세스)
 
-주기적으로 Tableau OOT_추출용 **전체(시험종류 등 필터 없음)** 를 조회해 **신규** 관리이탈
-(정책에 따라 주의 포함)을 감지하고, 기존 QMS 메일 모듈(oot_mail → qms_alert.send_email)로 발송한다.
+주기적으로 Databricks `광동제약_gmp_lims`(수정판 LIMS 결과)에서 **전 시험종류**를 조회해
+품목·시험항목별 ±2σ 초과 후보 중 **신규** 관리이탈(정책에 따라 주의 포함)을 감지하고,
+기존 QMS 메일 모듈(oot_mail → qms_alert.send_email)로 발송한다.
 이미 발송한 건은 상태파일(.oot_alarm_state.json)로 중복 차단한다.
 
 ★ 첫 실행(상태파일 없음)은 현재 OOT 전체를 '기준선'으로만 기록하고 **발송하지 않는다**
@@ -17,36 +18,23 @@ OOT 자동 알람 스케줄러 (독립 프로세스)
 from __future__ import annotations
 
 import argparse
-import csv
-import io
 import json
 import os
 import sys
 import time
-from datetime import date, datetime
+from datetime import datetime
 
-import httpx
-import urllib3
 from dotenv import load_dotenv
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _HERE = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_HERE, ".env"), override=False)
 sys.path.insert(0, _HERE)
+import kdp_core as core  # noqa: E402
 import oot_mail  # noqa: E402
 
-SERVER = os.getenv("TABLEAU_SERVER", "http://tableau.ekdp.com")
-VER = os.getenv("TABLEAU_API_VERSION", "3.21")
-BASE = f"{SERVER}/api/{VER}"
-PAT_NAME = os.getenv("TABLEAU_PAT_NAME", "MISO")
-PAT_SECRET = os.getenv("TABLEAU_PAT_SECRET", "")
-WORKBOOK = "OOT 대시보드"
-VIEW = "OOT_추출용"
 STATE_PATH = os.path.join(_HERE, ".oot_alarm_state.json")
-PAT_STATE_PATH = os.path.join(_HERE, ".pat_alarm_state.json")
 LOG_PATH = os.path.join(_HERE, "oot_alarm.log")
 DASH_URL = os.getenv("OOT_DASHBOARD_URL", "http://localhost:8502")
-PAT_WARN_DAYS = int(os.getenv("TABLEAU_PAT_WARN_DAYS", "20"))
 
 # 시험종류 — 전체 커버. vf_시험종류로 조회하며 각 행에 시험종류를 태깅(export에 시험종류 컬럼 없음).
 OOT_TEST_TYPES = [
@@ -108,36 +96,6 @@ def _oot_status(s) -> str:
     return "데이터부족"
 
 
-def _num(x) -> float:
-    try:
-        return float(str(x).replace(",", "").strip())
-    except Exception:
-        return float("nan")
-
-
-def _signin(c):
-    if not PAT_SECRET:
-        raise RuntimeError("TABLEAU_PAT_SECRET 미설정(.env)")
-    r = c.post(f"{BASE}/auth/signin", json={"credentials": {
-        "personalAccessTokenName": PAT_NAME, "personalAccessTokenSecret": PAT_SECRET,
-        "site": {"contentUrl": ""}}},
-        headers={"Accept": "application/json", "Content-Type": "application/json"})
-    r.raise_for_status()
-    cr = r.json()["credentials"]
-    return cr["token"], cr["site"]["id"]
-
-
-def _view_id(c, tok, site):
-    H = {"X-Tableau-Auth": tok, "Accept": "application/json"}
-    wbm = {w["id"]: w["name"] for w in c.get(f"{BASE}/sites/{site}/workbooks",
-           headers=H, params={"pageSize": "1000"}).json()["workbooks"]["workbook"]}
-    for v in c.get(f"{BASE}/sites/{site}/views", headers=H,
-                   params={"pageSize": "1000"}).json()["views"]["view"]:
-        if v["name"] == VIEW and wbm.get(v.get("workbook", {}).get("id", "")) == WORKBOOK:
-            return v["id"]
-    return None
-
-
 def load_state() -> set:
     if os.path.exists(STATE_PATH):
         try:
@@ -153,95 +111,31 @@ def save_state(keys) -> None:
         json.dump(sorted(keys), f, ensure_ascii=False)
 
 
-def check_pat_expiry(cfg: dict) -> None:
-    """PAT 만료일 점검 — 잔여 ≤ 임계(기본 20일)이면 PAT 수신자에게 메일.
-    10분 주기 스팸 방지를 위해 같은 만료일 기준 **하루 1회**만 발송(.pat_alarm_state.json)."""
-    expiry = str(cfg.get("pat_expiry") or os.getenv("TABLEAU_PAT_EXPIRY", "")).strip()
-    if not expiry:
-        return                                   # 만료일 미설정 — 점검 생략
-    try:
-        exp = datetime.strptime(expiry[:10], "%Y-%m-%d").date()
-    except ValueError:
-        _log(f"PAT 만료일 형식 오류: {expiry!r}")
-        return
-    days_left = (exp - date.today()).days
-    if days_left > PAT_WARN_DAYS:
-        return                                   # 아직 여유 — 알림 없음
-    recips = [e.strip() for e in (cfg.get("pat_recipients") or []) if e and e.strip()]
-    if not recips:
-        _log(f"PAT 만료 D-{days_left}({exp}) — PAT 수신자 미지정, 발송 생략")
-        return
-    # 같은 만료일 기준 오늘 이미 보냈으면 생략(일 1회)
-    today = date.today().isoformat()
-    st = {}
-    if os.path.exists(PAT_STATE_PATH):
-        try:
-            with open(PAT_STATE_PATH, encoding="utf-8") as f:
-                st = json.load(f) or {}
-        except Exception:
-            st = {}
-    if st.get("last_sent") == today and st.get("expiry") == exp.isoformat():
-        _log(f"PAT 만료 D-{days_left}({exp}) — 오늘 이미 발송, 생략")
-        return
-    ok, msg = oot_mail.send_pat_alert(PAT_NAME, exp.isoformat(), days_left,
-                                      cfg=cfg, recipients=recips, tableau_url=SERVER)
-    if ok:
-        with open(PAT_STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump({"last_sent": today, "expiry": exp.isoformat(), "days_left": days_left},
-                      f, ensure_ascii=False)
-        _log(f"✅ PAT 만료 알림 발송: D-{days_left}({exp}) → {len(recips)}명")
-    else:
-        _log(f"⚠️ PAT 만료 알림 실패: {msg} (다음 주기 재시도)")
-
-
 def check_once() -> None:
     cfg = oot_mail.load_config()
-    try:
-        check_pat_expiry(cfg)                    # PAT 만료 점검(Tableau 무관 — 항상 수행)
-    except Exception as e:
-        _log(f"PAT 만료 점검 오류: {e}")
     if not cfg.get("enabled", True):
         _log("알람 비활성화(enabled=false) — 건너뜀")
         return
     targets = {"관리이탈"} if cfg.get("policy", "관리이탈만") == "관리이탈만" else {"관리이탈", "주의"}
 
-    c = httpx.Client(timeout=180.0, verify=False)
+    # Databricks에서 전 시험종류를 한 번에 조회(±2σ 초과 후보, 평균·표준편차 포함).
     try:
-        tok, site = _signin(c)
-        vid = _view_id(c, tok, site)
-        if not vid:
-            _log("OOT_추출용 뷰를 찾지 못함")
-            return
+        candidates = core.fetch_oot_rows_for_types(OOT_TEST_TYPES)
     except Exception as e:
-        _log(f"Tableau 인증 실패: {e}")
+        _log(f"Databricks 조회 실패: {e}")
         return
 
-    # 시험종류별로 조회 → 각 행에 시험종류 태깅(전체 시험종류 커버). 현재 OOT(정량·대상분류).
     cur = {}
-    total = 0
-    for tt in OOT_TEST_TYPES:
-        try:
-            text = c.get(f"{BASE}/sites/{site}/views/{vid}/data",
-                         headers={"X-Tableau-Auth": tok}, params={"vf_시험종류": tt}).text
-        except Exception as e:
-            _log(f"[{tt}] 조회 실패: {e}")
+    for r in candidates:
+        status = _oot_status(r.get("OOT_구간분류_히트맵"))
+        if status not in targets:
             continue
-        for r in csv.DictReader(io.StringIO(text)):
-            total += 1
-            status = _oot_status(r.get("OOT_구간분류_히트맵"))
-            if status not in targets:
-                continue
-            if not (_num(r.get("확인_표준편차")) > 0):   # 정성/데이터부족 제외
-                continue
-            key = "|".join([tt, r.get("품목코드", ""), r.get("제조번호", ""),
-                            r.get("시험항목", ""), status])
-            cur[key] = {"시험종류": tt, "품목": r.get("품목", ""), "품목코드": r.get("품목코드", ""),
-                        "제조번호": r.get("제조번호", ""), "시험항목": r.get("시험항목", ""),
-                        "결과값": r.get("LOT결과_0제외", ""), "분류": r.get("OOT_구간분류_히트맵", ""),
-                        "평균": r.get("확인_평균", ""), "표준편차": r.get("확인_표준편차", "")}
-    if total == 0:
-        _log("데이터 비어있음(extract 갱신 중일 수 있음) — 건너뜀")
-        return
+        tt = r.get("시험종류", "")
+        key = "|".join([tt, r.get("품목코드", ""), r.get("제조번호", ""), r.get("시험항목", ""), status])
+        cur[key] = {"시험종류": tt, "품목": r.get("품목", ""), "품목코드": r.get("품목코드", ""),
+                    "제조번호": r.get("제조번호", ""), "시험항목": r.get("시험항목", ""),
+                    "결과값": r.get("LOT결과_0제외", ""), "분류": r.get("OOT_구간분류_히트맵", ""),
+                    "평균": r.get("확인_평균", ""), "표준편차": r.get("확인_표준편차", "")}
 
     first_run = not os.path.exists(STATE_PATH)
     if first_run:
@@ -291,7 +185,7 @@ def check_once() -> None:
         recs = [cur[k] for k in keys]
         subj = f"[OOT 알람] {tt} 신규 {len(recs)}건 ({datetime.now():%Y-%m-%d %H:%M})"
         ok, msg = oot_mail.send_oot_alert(recs, cfg=cfg, subject=subj,
-                                          dashboard_url=DASH_URL, tableau_url=SERVER, recipients=grp)
+                                          dashboard_url=DASH_URL, recipients=grp)
         if ok:
             sent_keys.extend(keys)
             _log(f"  ✅ [{tt}] {len(recs)}건 → {len(grp)}명 발송 성공")

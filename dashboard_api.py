@@ -545,65 +545,9 @@ def api_groups_set(body: GroupsBody):
     return {"ok": True, "groups": clean}
 
 
-# ── PAT(개인용 액세스 토큰) 만료 ──────────────────────────────────────────────
-class PatConfigBody(BaseModel):
-    expiry: str = ""
-    recipients: list[str] = []
-
-
-def _pat_message(info: dict) -> str:
-    d = info.get("daysLeft")
-    if d is None:
-        return ""
-    if info.get("expired"):
-        return f"PAT가 만료되었습니다({abs(d)}일 경과). 태블로 설정창에서 PAT 신규발급 및 갱신하세요."
-    return f"PAT 만료 {d}일 전입니다. 태블로 설정창에서 PAT 신규발급 및 갱신하세요."
-
-
-@app.get("/api/pat/info")
-def api_pat_info():
-    """좌측 패널·접속 팝업용 PAT 만료 정보(이름·만료일·잔여일·경고·안내문)."""
-    cfg = oot_mail.load_config()
-    info = core.pat_info(expiry_override=cfg.get("pat_expiry"))
-    info["message"] = _pat_message(info)
-    return info
-
-
-@app.get("/api/pat/config")
-def api_pat_config_get():
-    """PAT 설정(만료일·수신자) + 토큰명 + 마스터 DB(수신자 선택용)."""
-    cfg = oot_mail.load_config()
-    info = core.pat_info(expiry_override=cfg.get("pat_expiry"))
-    return {"expiry": cfg.get("pat_expiry") or info.get("expiry") or "",
-            "recipients": cfg.get("pat_recipients") or [],
-            "name": info.get("name"), "thresholdDays": info.get("thresholdDays"),
-            "recipientsDb": recipients_db.load_db()}
-
-
-@app.post("/api/pat/config")
-def api_pat_config_set(body: PatConfigBody):
-    """PAT 만료일·수신자 저장. 수신자는 마스터 DB에 존재하는 이메일만 허용(정합성)."""
-    exp = str(body.expiry or "").strip()
-    if exp:
-        try:
-            from datetime import datetime as _dt
-            exp = _dt.strptime(exp[:10], "%Y-%m-%d").date().isoformat()
-        except ValueError:
-            raise HTTPException(400, "만료일 형식 오류(YYYY-MM-DD)")
-    valid = {r["email"].strip().lower() for r in recipients_db.load_db()}
-    recips = [str(e).strip() for e in (body.recipients or []) if str(e).strip().lower() in valid]
-    cfg = oot_mail.load_config()
-    cfg["pat_expiry"] = exp
-    cfg["pat_recipients"] = recips
-    oot_mail.save_config(cfg)
-    info = core.pat_info(expiry_override=exp)
-    info["message"] = _pat_message(info)
-    return {"ok": True, "expiry": exp, "recipients": recips, "info": info}
-
-
 @app.post("/api/refresh")
 def api_refresh():
-    """데이터 캐시 무효화('데이터 새로고침') — 다음 조회는 Tableau에서 새로 가져옴."""
+    """데이터 캐시 무효화('데이터 새로고침') — 다음 조회는 Databricks에서 새로 가져옴."""
     n = core.clear_data_cache()
     return {"ok": True, "cleared": n}
 

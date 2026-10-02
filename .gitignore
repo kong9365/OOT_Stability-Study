@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 
+# === axhub CLI 내부 상태 ===
+.axhub/
+
 # === 비밀번호/자격증명 (절대 커밋 금지) ===
 .env
 network_gate.json

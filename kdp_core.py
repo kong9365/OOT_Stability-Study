@@ -3,7 +3,8 @@
 kdp_core.py — 광동 품질·시험 통합 대시보드 백엔드 로직 (Streamlit 비의존).
 
 FastAPI(dashboard_api.py)와 필요 시 다른 진입점이 공유하는 순수 Python 모듈.
-Tableau OOT_추출용 뷰에서 데이터를 받아 OOT 판정 / 안정성 회귀 / ANCOVA를 계산한다.
+Databricks `광동제약_gmp_lims`(수정판 LIMS 결과, databricks_client.py)에서 데이터를 받아
+OOT 판정 / 안정성 회귀 / ANCOVA를 계산한다.
 
 핵심 함수
   - oot_products(test_type)            : (품목코드, 품목) 목록
@@ -24,27 +25,18 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import Optional
 
-import httpx
 import numpy as np
 import pandas as pd
-import urllib3
 from dotenv import load_dotenv
 
+import databricks_client as dbx
 from stability import analyze_dataframe, ci_bound  # 검증된 회귀 엔진 재사용
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=False)
 
-TABLEAU_SERVER = os.getenv("TABLEAU_SERVER", "http://tableau.ekdp.com").rstrip("/")
-API_VER = os.getenv("TABLEAU_API_VERSION", "3.21")
-PAT_NAME = os.getenv("TABLEAU_PAT_NAME", "MISO")
-PAT_SECRET = os.getenv("TABLEAU_PAT_SECRET", "")
-# PAT 만료일 — Tableau REST API가 만료일을 반환하지 않으므로 설정값(.env/설정창)으로 관리.
-PAT_EXPIRY = os.getenv("TABLEAU_PAT_EXPIRY", "").strip()       # 'YYYY-MM-DD'
-PAT_WARN_DAYS = int(os.getenv("TABLEAU_PAT_WARN_DAYS", "20"))  # 만료 N일 전부터 경고
-BASE = f"{TABLEAU_SERVER}/api/{API_VER}"
-OOT_WORKBOOK = "OOT 대시보드"
-OOT_VIEW_NAME = "OOT_추출용"
+# 데이터 출처: Databricks `광동제약_gmp_lims` (bronze, 서비스 계정 OAuth M2M). 인증·SQL 상세는 databricks_client.py.
+LIMS_CATALOG = "광동제약_gmp_lims"
+PLANT_CD = "005"
 
 # 시험종류 — Tableau vf_시험종류 서버측 필터값(완제품 기본). 안정성 종류는 '안정성' 포함.
 # 시험종류 목록(드롭다운 폴백). Tableau 뷰 'OOT_추출용'은 vf_시험종류 파라미터로 필터되며
@@ -64,16 +56,13 @@ STAB_TEST_TYPES = [t for t in OOT_TEST_TYPES if "안정성" in t]
 # 안정성 차트 배치 색상 팔레트(디자인 일치)
 BATCH_COLORS = ["#E5310F", "#1F7A52", "#B8893B", "#2563eb", "#9333ea", "#0891b2"]
 
-# ── Tableau 클라이언트 (토큰·뷰ID 캐시) ─────────────────────────────────────
+# ── 데이터 캐시(기존 Tableau 연동과 동일한 캐시 전략 유지) ───────────────────
 _LOCK = threading.Lock()
-_client = httpx.Client(timeout=120.0, verify=False)
-_auth = {"token": None, "site": None, "view_id": None, "ts": 0.0}
 
-# 뷰 데이터(CSV) 인메모리 TTL 캐시 — 같은 params 반복 조회를 네트워크 없이 즉시 반환.
-# (Tableau export가 건당 15~33초로 느려 동일 데이터 중복 조회가 체감속도의 주원인)
+# 조회 결과(CSV 텍스트) 인메모리 TTL 캐시 — 같은 params 반복 조회를 네트워크 없이 즉시 반환.
 _DATA_CACHE: dict[str, tuple[str, float]] = {}   # key -> (csv_text, wall_ts)
 _CACHE_TTL = float(os.getenv("KDP_CACHE_TTL_SEC", "300"))
-# 디스크 영속 캐시 — 서버 재시작 후에도 이전 조회 데이터를 즉시 재사용(Tableau 재조회 생략).
+# 디스크 영속 캐시 — 서버 재시작 후에도 이전 조회 데이터를 즉시 재사용(Databricks 재조회 생략).
 _CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".kdp_data_cache.pkl.gz")
 
 
@@ -116,7 +105,6 @@ def clear_data_cache() -> int:
         n = len(_DATA_CACHE)
         _DATA_CACHE.clear()
         _testtype_cache["types"] = None            # 시험종류 목록도 다음 조회 시 재조회
-        _named_view_ids.clear()
     try:
         if os.path.exists(_CACHE_FILE):
             os.remove(_CACHE_FILE)
@@ -125,84 +113,109 @@ def clear_data_cache() -> int:
     return n
 
 
-def pat_info(expiry_override: Optional[str] = None) -> dict:
-    """PAT(개인용 액세스 토큰) 이름·만료일·잔여일·경고여부.
+# ── Databricks 조회 SQL (수정판 LIMS 결과 — gold 뷰 결함을 bronze에서 직접 보정) ──
+# 상세: Databricks/DATABRICKS_LIMS_INTEGRATION.md §7.1·§7.3. PLANT_CD=005, 차수(ORDER_ID)까지
+# 조인해 중복 제거, 문자 결과는 RESULT_VALUE_NUMBER에서 제외(try_cast 성공 시만 채움).
+_RESULTS_CTE = f"""
+WITH results AS (
+  SELECT
+    trr.ITEM_CD,
+    CASE WHEN trim(coalesce(trr.ITEM_NM_REPORT,'')) = '' THEN cii.ITEM_NM ELSE trr.ITEM_NM_REPORT END AS ITEM_NM,
+    trr.LOT_NO, qbm.BIZPROCESS_NM, ttr.TESTITEM_NM, ttr.GROUP_NM, ttr.STANDARD_TEXT,
+    CASE WHEN try_cast(ttr.RESULT_VALUE AS DOUBLE) IS NOT NULL THEN ttr.RESULT_VALUE_NUMBER END AS RESULT_VALUE_NUMBER,
+    try_cast(nullif(trr.REQUEST_DATE,'') AS DATE) AS REQUEST_DATE,
+    try_cast(nullif(trr.LOT_DATE,'') AS DATE) AS LOT_DATE,
+    try_cast(nullif(trr.EXPIRE_DATE,'') AS DATE) AS EXPIRE_DATE,
+    trr.REQUEST_REMARK
+  FROM `{LIMS_CATALOG}`.bronze.lims_dbo_test_request_receive trr
+  LEFT JOIN `{LIMS_CATALOG}`.bronze.lims_dbo_test_order_result tor
+    ON tor.PLANT_CD=trr.PLANT_CD AND tor.REQUEST_ID=trr.REQUEST_ID
+  LEFT JOIN `{LIMS_CATALOG}`.bronze.lims_dbo_test_testitem_result ttr
+    ON ttr.PLANT_CD=tor.PLANT_CD AND ttr.REQUEST_ID=tor.REQUEST_ID AND ttr.ORDER_ID=tor.ORDER_ID
+  LEFT JOIN `{LIMS_CATALOG}`.bronze.lims_dbo_cm_item_info cii
+    ON cii.PLANT_CD=trr.PLANT_CD AND cii.ITEM_CD=trr.ITEM_CD
+  LEFT JOIN `{LIMS_CATALOG}`.bronze.lims_dbo_qm_bizprocess_master qbm
+    ON qbm.PLANT_CD=trr.PLANT_CD AND qbm.BIZPROCESS_CD=trr.BIZPROCESS_CD
+  WHERE trr.PLANT_CD='{PLANT_CD}' AND ttr.TESTITEM_ID IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY trr.PLANT_CD,trr.REQUEST_ID,tor.ORDER_ID,ttr.TESTITEM_ID
+    ORDER BY ttr.UPDATE_TIME DESC, tor.UPDATE_TIME DESC
+  )=1
+)
+"""
 
-    Tableau REST API는 PAT 만료일을 반환하지 않으므로 만료일은 설정값으로 관리한다
-    (설정창 저장값 expiry_override 우선, 없으면 .env의 TABLEAU_PAT_EXPIRY).
-    daysLeft 음수면 이미 만료. warn 은 잔여일 ≤ 임계(기본 20일)일 때 True.
+
+def _sql_literal(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _row_to_korean(r: dict) -> dict:
+    """Databricks 결과행(영문 컬럼) → 기존 Tableau 'OOT_추출용' CSV와 동일한 한글 컬럼 dict.
+
+    확인_평균·확인_표준편차·OOT_구간분류_히트맵은 Tableau 계산 필드였던 자리로, 이 값들은
+    kdp_core의 사업 로직(oot_lot_summary 등)이 선택 연도 범위로 항상 자체 재계산하므로
+    여기서는 '정량(수치) 결과 여부' 플래그로만 채운다(1=정량, 0=정성/결과없음).
     """
-    exp_str = (expiry_override or PAT_EXPIRY or "").strip()
-    info = {"name": PAT_NAME, "expiry": exp_str, "daysLeft": None,
-            "warn": False, "expired": False, "thresholdDays": PAT_WARN_DAYS}
-    if exp_str:
-        try:
-            exp = datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
-            days = (exp - date.today()).days
-            info["expiry"] = exp.isoformat()
-            info["daysLeft"] = days
-            info["expired"] = days < 0
-            info["warn"] = days <= PAT_WARN_DAYS
-        except ValueError:
-            pass
-    return info
+    v = r.get("RESULT_VALUE_NUMBER")
+    is_quant = v is not None
+    vs = "" if v is None else str(v)
+    return {
+        "품목코드": r.get("ITEM_CD") or "", "품목": r.get("ITEM_NM") or "",
+        "제조번호": r.get("LOT_NO") or "", "시험항목": r.get("TESTITEM_NM") or "",
+        "대분류": r.get("GROUP_NM") or "", "시험기준": r.get("STANDARD_TEXT") or "",
+        "LOT결과_0제외": vs, "확인_평균": vs, "확인_표준편차": "1" if is_quant else "0",
+        "OOT_구간분류_히트맵": "",
+        "의뢰일자": r.get("REQUEST_DATE") or "", "제조일자": r.get("LOT_DATE") or "",
+        "유효기한": r.get("EXPIRE_DATE") or "", "의뢰 특이사항": r.get("REQUEST_REMARK") or "",
+    }
 
 
-def _signin() -> tuple[str, str]:
-    if not PAT_SECRET:
-        raise RuntimeError("TABLEAU_PAT_SECRET 미설정(.env)")
-    r = _client.post(f"{BASE}/auth/signin", json={"credentials": {
-        "personalAccessTokenName": PAT_NAME, "personalAccessTokenSecret": PAT_SECRET,
-        "site": {"contentUrl": ""}}},
-        headers={"Accept": "application/json", "Content-Type": "application/json"})
-    if r.status_code != 200:
-        raise RuntimeError(f"Tableau 인증 실패 {r.status_code}: {r.text[:160]}")
-    cr = r.json()["credentials"]
-    return cr["token"], cr["site"]["id"]
+_FULL_FIELDS = ["품목코드", "품목", "제조번호", "시험항목", "대분류", "시험기준",
+               "LOT결과_0제외", "확인_평균", "확인_표준편차", "OOT_구간분류_히트맵",
+               "의뢰일자", "제조일자", "유효기한", "의뢰 특이사항"]
 
 
-def _resolve_view_id(tok: str, site: str) -> Optional[str]:
-    H = {"X-Tableau-Auth": tok, "Accept": "application/json"}
-    wbm = {w["id"]: w["name"] for w in _client.get(
-        f"{BASE}/sites/{site}/workbooks", headers=H, params={"pageSize": "1000"}
-    ).json().get("workbooks", {}).get("workbook", [])}
-    for v in _client.get(f"{BASE}/sites/{site}/views", headers=H,
-                         params={"pageSize": "1000"}).json().get("views", {}).get("view", []):
-        if v["name"] == OOT_VIEW_NAME and wbm.get(v.get("workbook", {}).get("id", "")) == OOT_WORKBOOK:
-            return v["id"]
-    return None
-
-
-def _ensure() -> tuple[str, str, str]:
-    """토큰·사이트·뷰ID 확보(15분 캐시, 만료/401시 재인증). 스레드 안전."""
-    with _LOCK:
-        if _auth["token"] and (time.monotonic() - _auth["ts"] < 900):
-            return _auth["token"], _auth["site"], _auth["view_id"]
-        tok, site = _signin()
-        vid = _resolve_view_id(tok, site)
-        if not vid:
-            raise RuntimeError("OOT_추출용 뷰를 찾지 못함")
-        _auth.update(token=tok, site=site, view_id=vid, ts=time.monotonic())
-        return tok, site, vid
+def _rows_to_csv(rows: list[dict], fields: list[str]) -> str:
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=fields)
+    w.writeheader()
+    for r in rows:
+        w.writerow(r)
+    return buf.getvalue()
 
 
 def _fetch_csv(params: dict) -> str:
-    """Tableau 뷰 데이터 CSV 실조회(네트워크). 401 시 1회 재인증."""
-    tok, site, vid = _ensure()
-    url = f"{BASE}/sites/{site}/views/{vid}/data"
-    r = _client.get(url, headers={"X-Tableau-Auth": tok}, params=params)
-    if r.status_code == 401:                       # 토큰 만료 → 강제 재인증 1회
-        with _LOCK:
-            _auth["token"] = None
-        tok, site, vid = _ensure()
-        url = f"{BASE}/sites/{site}/views/{vid}/data"
-        r = _client.get(url, headers={"X-Tableau-Auth": tok}, params=params)
-    r.raise_for_status()
-    return r.text
+    """Databricks 조회 → 기존 Tableau 뷰 CSV와 동일한 형태의 텍스트(네트워크 호출).
+
+    params는 기존 Tableau 뷰 파라미터 이름을 그대로 쓴다(vf_시험종류/vf_품목코드) — 호출부 불변.
+    vf_품목코드가 없으면(품목 목록 조회) 가벼운 DISTINCT 조회만 수행한다.
+    """
+    test_type = params.get("vf_시험종류")
+    item_code = params.get("vf_품목코드")
+    if item_code:
+        clauses, sql_params = ["BIZPROCESS_NM = :tt", "ITEM_CD = :code"], {"tt": test_type, "code": item_code}
+        sql = _RESULTS_CTE + "SELECT * FROM results WHERE " + " AND ".join(clauses)
+        rows = [_row_to_korean(r) for r in dbx.query(sql, sql_params)]
+        return _rows_to_csv(rows, _FULL_FIELDS)
+    # 품목 목록만 필요(oot_products) — 전체 조인 없이 가벼운 DISTINCT 조회.
+    sql = f"""
+SELECT DISTINCT trr.ITEM_CD AS ITEM_CD,
+  coalesce(nullif(trr.ITEM_NM_REPORT, ''), cii.ITEM_NM) AS ITEM_NM
+FROM `{LIMS_CATALOG}`.bronze.lims_dbo_test_request_receive trr
+LEFT JOIN `{LIMS_CATALOG}`.bronze.lims_dbo_cm_item_info cii
+  ON cii.PLANT_CD=trr.PLANT_CD AND cii.ITEM_CD=trr.ITEM_CD
+LEFT JOIN `{LIMS_CATALOG}`.bronze.lims_dbo_qm_bizprocess_master qbm
+  ON qbm.PLANT_CD=trr.PLANT_CD AND qbm.BIZPROCESS_CD=trr.BIZPROCESS_CD
+WHERE trr.PLANT_CD='{PLANT_CD}' AND qbm.BIZPROCESS_NM = :tt AND trr.ITEM_CD IS NOT NULL
+ORDER BY ITEM_CD
+"""
+    rows = [{"품목코드": r.get("ITEM_CD") or "", "품목": r.get("ITEM_NM") or ""}
+            for r in dbx.query(sql, {"tt": test_type})]
+    return _rows_to_csv(rows, ["품목코드", "품목"])
 
 
 def _view_csv(params: dict) -> str:
-    """뷰 데이터 CSV — 인메모리 TTL 캐시. 같은 params 재조회는 즉시(네트워크 생략)."""
+    """조회 결과 CSV — 인메모리 TTL 캐시. 같은 params 재조회는 즉시(네트워크 생략)."""
     key = "|".join(f"{k}={v}" for k, v in sorted(params.items()))
     now = time.time()
     with _LOCK:
@@ -216,32 +229,9 @@ def _view_csv(params: dict) -> str:
     return text
 
 
-# ── 시험종류 목록: 경량 별도 뷰에서 동적 조회(+안전 폴백) ──────────────────
-# Tableau에 '시험종류'만 담은 경량 뷰(이름 = KDP_TESTTYPE_VIEW, 기본 '시험종류목록')를 만들면
-# 그 뷰의 '시험종류' 컬럼 distinct 값으로 목록을 자동 구성한다. 뷰가 없거나 실패하면 하드코딩 OOT_TEST_TYPES 사용.
-TESTTYPE_VIEW_NAME = os.getenv("KDP_TESTTYPE_VIEW", "시험종류목록")
-_named_view_ids: dict[str, str] = {}
+# ── 시험종류 목록: Databricks에서 동적 조회(+안전 폴백) ────────────────────
 _testtype_cache: dict[str, object] = {"types": None, "ts": 0.0}
 _TESTTYPE_TTL = float(os.getenv("KDP_TESTTYPE_TTL_SEC", "3600"))   # 시험종류는 자주 안 바뀜 → 1시간
-
-
-def _resolve_named_view_id(tok: str, site: str, name: str) -> Optional[str]:
-    """뷰 이름으로 view id 조회(OOT_WORKBOOK 우선, 없으면 이름만 매칭). 성공 시 캐시."""
-    if name in _named_view_ids:
-        return _named_view_ids[name]
-    H = {"X-Tableau-Auth": tok, "Accept": "application/json"}
-    wbm = {w["id"]: w["name"] for w in _client.get(
-        f"{BASE}/sites/{site}/workbooks", headers=H, params={"pageSize": "1000"}
-    ).json().get("workbooks", {}).get("workbook", [])}
-    views = _client.get(f"{BASE}/sites/{site}/views", headers=H,
-                        params={"pageSize": "1000"}).json().get("views", {}).get("view", [])
-    vid = next((v["id"] for v in views
-                if v["name"] == name and wbm.get(v.get("workbook", {}).get("id", "")) == OOT_WORKBOOK), None)
-    if not vid:                                     # 워크북 무관 이름 매칭(차선)
-        vid = next((v["id"] for v in views if v["name"] == name), None)
-    if vid:
-        _named_view_ids[name] = vid
-    return vid
 
 
 def _order_test_types(types: list[str]) -> list[str]:
@@ -251,35 +241,63 @@ def _order_test_types(types: list[str]) -> list[str]:
 
 
 def _fetch_test_types() -> Optional[list[str]]:
-    """경량 뷰에서 '시험종류' distinct. 뷰/컬럼 없으면 None(→폴백)."""
-    tok, site, _ = _ensure()                        # 기존 인증 재사용(OOT 데이터 경로 불변)
-    vid = _resolve_named_view_id(tok, site, TESTTYPE_VIEW_NAME)
-    if not vid:
-        return None
-    url = f"{BASE}/sites/{site}/views/{vid}/data"
-    r = _client.get(url, headers={"X-Tableau-Auth": tok})
-    if r.status_code == 401:                        # 토큰 만료 → 재인증 1회
-        with _LOCK:
-            _auth["token"] = None
-        _named_view_ids.pop(TESTTYPE_VIEW_NAME, None)
-        tok, site, _ = _ensure()
-        vid = _resolve_named_view_id(tok, site, TESTTYPE_VIEW_NAME)
-        if not vid:
-            return None
-        r = _client.get(f"{BASE}/sites/{site}/views/{vid}/data", headers={"X-Tableau-Auth": tok})
-    r.raise_for_status()
-    rows = list(csv.DictReader(io.StringIO(r.text)))
-    if not rows:
-        return None
-    col = next((c for c in rows[0].keys() if c and "시험종류" in c), None)
-    if not col:
-        return None
-    seen, out = set(), []
-    for row in rows:
-        v = (row.get(col) or "").strip()
-        if v and v not in seen:
-            seen.add(v); out.append(v)
+    """실제 시험 의뢰에 쓰인 시험종류(BIZPROCESS_NM) distinct. 조회 실패 시 None(→폴백)."""
+    sql = f"""
+SELECT DISTINCT qbm.BIZPROCESS_NM AS BIZPROCESS_NM
+FROM `{LIMS_CATALOG}`.bronze.lims_dbo_test_request_receive trr
+JOIN `{LIMS_CATALOG}`.bronze.lims_dbo_qm_bizprocess_master qbm
+  ON qbm.PLANT_CD=trr.PLANT_CD AND qbm.BIZPROCESS_CD=trr.BIZPROCESS_CD
+WHERE trr.PLANT_CD='{PLANT_CD}' AND qbm.BIZPROCESS_NM IS NOT NULL
+"""
+    rows = dbx.query(sql)
+    out = [str(r["BIZPROCESS_NM"]).strip() for r in rows if r.get("BIZPROCESS_NM")]
     return out or None
+
+
+def fetch_oot_rows_for_types(test_types: list[str]) -> list[dict]:
+    """자동 알람(oot_alarm.py)용 — 지정된 전 시험종류를 한 번에 조회하고 Databricks에서
+    품목·시험종류·시험항목별 평균/표준편차/Z-score까지 계산해 ±2σ 초과 후보만 반환한다.
+
+    kdp_core의 다른 조회(_product_df 등)는 선택 연도 범위로 평균·표준편차를 자체 재계산하므로
+    원천 확인_표준편차가 '정량 여부' 플래그로만 있어도 충분하지만, 이 알람 경로는 그 값을
+    그대로 메일 본문·발송이력(oot_alarm_sent.csv)에 적는다 — 따라서 여기서는 전체 이력 기준
+    실제 평균·표준편차를 계산해 돌려준다(기존 Tableau 'OOT_구간분류_히트맵'과 동일한 역할).
+
+    반환: 기존 Tableau CSV와 동일한 한글 키 dict 목록(+시험종류), ±2σ 이내(정상)는 제외.
+    """
+    if not test_types:
+        return []
+    params = {f"tt{i}": t for i, t in enumerate(test_types)}
+    placeholders = ", ".join(f":{k}" for k in params)
+    sql = _RESULTS_CTE + f"""
+, scored AS (
+  SELECT *,
+    avg(RESULT_VALUE_NUMBER) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, TESTITEM_NM) AS MEAN_VALUE,
+    stddev_samp(RESULT_VALUE_NUMBER) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, TESTITEM_NM) AS STDDEV_VALUE
+  FROM results
+  WHERE RESULT_VALUE_NUMBER IS NOT NULL AND ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
+    AND BIZPROCESS_NM IN ({placeholders})
+)
+SELECT *, (RESULT_VALUE_NUMBER - MEAN_VALUE) / nullif(STDDEV_VALUE, 0) AS Z_SCORE FROM scored
+WHERE abs((RESULT_VALUE_NUMBER - MEAN_VALUE) / nullif(STDDEV_VALUE, 0)) > 2
+"""
+    rows = dbx.query(sql, params)
+    out = []
+    for r in rows:
+        z = r.get("Z_SCORE")
+        az = abs(float(z)) if z is not None else None
+        label = "관리이탈 (±3σ 초과)" if (az is not None and az > 3) else "주의 (±2σ~±3σ)"
+        mean_v, sd_v = r.get("MEAN_VALUE"), r.get("STDDEV_VALUE")
+        out.append({
+            "시험종류": r.get("BIZPROCESS_NM") or "", "품목": r.get("ITEM_NM") or "",
+            "품목코드": r.get("ITEM_CD") or "", "제조번호": r.get("LOT_NO") or "",
+            "시험항목": r.get("TESTITEM_NM") or "",
+            "LOT결과_0제외": "" if r.get("RESULT_VALUE_NUMBER") is None else str(r["RESULT_VALUE_NUMBER"]),
+            "OOT_구간분류_히트맵": label,
+            "확인_평균": "" if mean_v is None else str(round(float(mean_v), 4)),
+            "확인_표준편차": "" if sd_v is None else str(round(float(sd_v), 4)),
+        })
+    return out
 
 
 def oot_test_types() -> list[str]:
@@ -461,11 +479,12 @@ def _we_run_rules(zs: list) -> tuple:
 
 
 def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str] = None) -> dict:
-    """선택 품목의 LOT별 판정 요약. 한 번의 Tableau 호출로 전 LOT 계산.
+    """선택 품목의 LOT별 판정 요약. 한 번의 Databricks 호출로 전 LOT 계산.
 
     year 지정('전체' 제외) 시: 해당 연도(제조번호 앞 2자리) LOT만 대상으로
     시험항목별 평균·±3σ를 재계산해 OOT를 재판정(APQR 연도별 관점).
-    year 미지정/'전체' 시: 기존대로 Tableau 사전계산 상태 사용.
+    year 미지정/'전체' 시에도 아래 로직이 항상 전 이력 기준으로 자체 재계산한다
+    (원천 확인_평균/확인_표준편차는 쓰지 않음 — _row_to_korean 주석 참고).
 
     반환: {code, name, lots:[{lot, year, normal, warn, crit, qual, flagged,
             items:[{name, val, mean, sd, z, status}]}], years:[...]}

@@ -57,8 +57,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "smtp_pass": "",           # 비우면 QMS_SMTP_PASS
     "enabled": True,
     "recipient_groups": {},    # {시험종류: [이메일,...]} — 시험종류별 수신 그룹
-    "pat_recipients": [],      # PAT 만료 알림 수신자(별도 목록)
-    "pat_expiry": os.environ.get("TABLEAU_PAT_EXPIRY", "").strip(),  # PAT 만료일 YYYY-MM-DD(설정창 갱신)
     "password_hash": hash_password(_INITIAL_PW),   # 평문 미저장(sha256)
     # 알람 실행 스케줄(oot_alarm.py 가 매 루프 읽음). save_config 는 이 dict 의 키만 저장하므로 반드시 등록.
     "schedule": {"mode": "daily", "daily_time": "07:30", "interval_min": 10},
@@ -173,7 +171,7 @@ def log_sent(records: list[dict], to_addrs: list[str]) -> None:
                         r.get("분류", ""), "; ".join(to_addrs)])
 
 
-def build_oot_email_html(records: list[dict], dashboard_url: str = "", tableau_url: str = "") -> str:
+def build_oot_email_html(records: list[dict], dashboard_url: str = "") -> str:
     """신규 OOT 행 목록 → HTML 메일 본문. 시험종류 맨 앞, 알림ID(추적용) 맨 뒤."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     rows = ""
@@ -197,9 +195,7 @@ def build_oot_email_html(records: list[dict], dashboard_url: str = "", tableau_u
         </tr>"""
     links = ""
     if dashboard_url:
-        links += f'<a href="{dashboard_url}" style="color:#2350a0">대시보드에서 확인</a> &nbsp;'
-    if tableau_url:
-        links += f'<a href="{tableau_url}/#/home" style="color:#2350a0">Tableau에서 확인</a>'
+        links += f'<a href="{dashboard_url}" style="color:#2350a0">대시보드에서 확인</a>'
     return f"""<html><body style="font-family:Pretendard,sans-serif;color:#1a2230">
     <div style="background:#13213a;color:#fff;padding:16px 22px;border-radius:10px 10px 0 0">
       <h2 style="margin:0;font-size:1.05rem">⚠️ OOT 알람 — 신규 {len(records)}건</h2>
@@ -228,7 +224,7 @@ def build_oot_email_html(records: list[dict], dashboard_url: str = "", tableau_u
 
 def send_oot_alert(records: list[dict], cfg: dict[str, Any] | None = None,
                    subject: str | None = None, dashboard_url: str = "",
-                   tableau_url: str = "", recipients: list[str] | None = None) -> tuple[bool, str]:
+                   recipients: list[str] | None = None) -> tuple[bool, str]:
     """OOT 알람 메일 발송. (성공여부, 메시지) 반환.
 
     recipients 가 주어지면 그 목록으로 발송(시험종류 그룹별 발송용). 없으면 cfg.recipients.
@@ -242,7 +238,7 @@ def send_oot_alert(records: list[dict], cfg: dict[str, Any] | None = None,
     if not sk["smtp_user"]:
         return False, "SMTP 발신 계정 미설정(QMS_SMTP_USER 또는 알림설정)."
     subj = subject or f"[OOT 알람] 신규 {len(records)}건 ({datetime.now():%Y-%m-%d %H:%M})"
-    body = build_oot_email_html(records, dashboard_url, tableau_url)
+    body = build_oot_email_html(records, dashboard_url)
     # QMS 모듈이 있으면 그것을, 없으면 내장 SMTP 함수로 발송(다른 노트북 자체완결)
     _sender = _qms.send_email if _qms is not None else _send_email_smtp
     try:
@@ -252,68 +248,6 @@ def send_oot_alert(records: list[dict], cfg: dict[str, Any] | None = None,
                 log_sent(records, to)   # 추적용 발송 이력 기록
             except Exception:
                 pass
-        return bool(ok), ("발송 성공" if ok else "발송 실패")
-    except Exception as e:
-        return False, f"발송 오류: {e}"
-
-
-# ── PAT(개인용 액세스 토큰) 만료 알림 ──────────────────────────────────────────
-def build_pat_email_html(name: str, expiry: str, days_left, tableau_url: str = "") -> str:
-    """PAT 만료 임박/만료 안내 메일 본문(HTML)."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    expired = isinstance(days_left, int) and days_left < 0
-    if expired:
-        head = f"Tableau PAT가 만료되었습니다 (만료 {abs(days_left)}일 경과)"
-        accent = "#b91c1c"
-    else:
-        head = f"Tableau PAT 만료 {days_left}일 전입니다"
-        accent = "#E5310F"
-    link = (f'<a href="{tableau_url}/#/account/settings" style="color:#2350a0">Tableau 설정에서 PAT 갱신</a>'
-            if tableau_url else "Tableau 설정 화면에서 PAT 신규발급 및 갱신")
-    return f"""<html><body style="font-family:Pretendard,sans-serif;color:#1a2230">
-    <div style="background:{accent};color:#fff;padding:16px 22px;border-radius:10px 10px 0 0">
-      <h2 style="margin:0;font-size:1.05rem">⏰ {head}</h2>
-      <p style="margin:4px 0 0;font-size:.82rem;opacity:.85">{now} · 광동제약 품질·시험</p>
-    </div>
-    <div style="padding:16px 8px">
-      <p style="font-size:.92rem;line-height:1.6">아래 Tableau 개인용 액세스 토큰(PAT)의 만료가 임박했습니다.
-      만료되면 대시보드의 Tableau 데이터 조회·자동 알람이 모두 중단됩니다.
-      <b>{link}</b>하시기 바랍니다.</p>
-      <table style="border-collapse:collapse;margin-top:8px;font-size:.88rem">
-        <tr><td style="padding:6px 14px;color:#888">토큰 이름</td>
-            <td style="padding:6px 14px;font-family:monospace;font-weight:700">{name}</td></tr>
-        <tr><td style="padding:6px 14px;color:#888">만료일</td>
-            <td style="padding:6px 14px;font-family:monospace;font-weight:700">{expiry or '-'}</td></tr>
-        <tr><td style="padding:6px 14px;color:#888">잔여</td>
-            <td style="padding:6px 14px;font-family:monospace;font-weight:700;color:{accent}">
-            {('만료 ' + str(abs(days_left)) + '일 경과') if expired else ('D-' + str(days_left))}</td></tr>
-      </table>
-      <p style="margin-top:14px;font-size:.78rem;color:#888">갱신 후에는 .env(TABLEAU_PAT_SECRET)와
-      알림설정의 PAT 만료일을 새 토큰 기준으로 업데이트하세요.</p>
-    </div>
-    <div style="background:#f3f4f8;padding:10px 22px;font-size:.76rem;color:#666;border-radius:0 0 10px 10px">
-      광동제약 품질·시험 플랫폼 · PAT 만료 알림
-    </div></body></html>"""
-
-
-def send_pat_alert(name: str, expiry: str, days_left, cfg: dict[str, Any] | None = None,
-                   recipients: list[str] | None = None, tableau_url: str = "") -> tuple[bool, str]:
-    """PAT 만료 알림 메일 발송. recipients 없으면 cfg.pat_recipients. (성공여부, 메시지)."""
-    cfg = cfg or load_config()
-    src = recipients if recipients is not None else (cfg.get("pat_recipients") or [])
-    to = [a.strip() for a in src if a and a.strip()]
-    if not to:
-        return False, "PAT 알림 수신자가 없습니다(알림설정 PAT 수신자에서 등록)."
-    sk = _smtp_kwargs(cfg)
-    if not sk["smtp_user"]:
-        return False, "SMTP 발신 계정 미설정(QMS_SMTP_USER 또는 알림설정)."
-    expired = isinstance(days_left, int) and days_left < 0
-    subj = (f"[PAT 만료] {name} 만료됨({abs(days_left)}일 경과)" if expired
-            else f"[PAT 만료 임박] {name} D-{days_left}")
-    body = build_pat_email_html(name, expiry, days_left, tableau_url)
-    _sender = _qms.send_email if _qms is not None else _send_email_smtp
-    try:
-        ok = _sender(subject=subj, body=body, to_addrs=to, html=True, **sk)
         return bool(ok), ("발송 성공" if ok else "발송 실패")
     except Exception as e:
         return False, f"발송 오류: {e}"
