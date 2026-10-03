@@ -1,0 +1,35 @@
+# 이미지에 넣지 않을 것 — .gitignore 목록을 그대로 따르고, 비밀·수신자·기록·개발용 파일을 한 번 더 막는다.
+
+# === 저장소·도구 내부 상태 ===
+.git/
+.axhub/
+.remember/
+__pycache__/
+*.pyc
+
+# === 비밀번호/자격증명 ===
+.env
+network_gate.json
+network_gate.json.bak_*
+*.bak_*
+
+# === 직원 개인정보 / 수신자 명단 ===
+recipients_db.json
+oot_alert_config.json
+
+# === 실데이터·운영 로그/캐시 ===
+.oot_alarm_state.json
+oot_alarm_sent.csv
+oot_alarm.log
+watchdog.log
+.kdp_data_cache.pkl.gz
+sample_OOT_report.xlsx
+*.log
+oot_export_*
+
+# === 개발·이 PC 전용 ===
+tests/
+offline_dbx.py
+*.bat
+*.vbs
+*.ps1

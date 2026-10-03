@@ -20,6 +20,7 @@ env:
     - name: DATABRICKS_WAREHOUSE_ID
     - name: API_KEY
     - name: OOT_ALARM_KEY_MODE
+    - name: OOT_EXPORT_KEY
     - name: QMS_SMTP_HOST
     - name: QMS_SMTP_PORT
     - name: QMS_SMTP_USER

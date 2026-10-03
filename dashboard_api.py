@@ -9,18 +9,23 @@ webapp/ 정적 프론트엔드를 서빙하고, OOT/안정성/알림 JSON API를
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import re
+import threading
+import time
 import urllib.parse
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import kdp_core as core
+import oot_export
 import oot_group
 import oot_mail
 import recipients_db
@@ -540,18 +545,88 @@ def api_groups_set(body: GroupsBody):
     return {"ok": True, "groups": clean}
 
 
+_REFRESH_MIN_SEC = 600                      # 새로고침은 10분에 한 번(작은 웨어하우스 보호)
+_refresh_lock = threading.Lock()
+_refresh_last: dict = {"t": None}
+
+
 @app.post("/api/refresh")
 def api_refresh():
-    """데이터 캐시 무효화('데이터 새로고침') — 다음 조회는 Databricks에서 새로 가져옴."""
+    """데이터 캐시 무효화('데이터 새로고침') — 다음 조회는 Databricks에서 새로 가져옴.
+    10분 안에 다시 부르면 비우지 않고 skipped=true 로 답한다(화면 버튼은 그대로 동작)."""
+    with _refresh_lock:
+        now, last = time.monotonic(), _refresh_last["t"]
+        if last is not None and now - last < _REFRESH_MIN_SEC:
+            return {"ok": True, "cleared": 0, "skipped": True,
+                    "reason": "10분 안에 다시 눌러 새로 받지 않고 임시 저장분을 씁니다.",
+                    "retryAfterSec": int(_REFRESH_MIN_SEC - (now - last)) + 1}
+        _refresh_last["t"] = now
     n = core.clear_data_cache()
-    return {"ok": True, "cleared": n}
+    return {"ok": True, "cleared": n, "skipped": False}
+
+
+# ── OOT 넘김 파일(우리 검토 도구가 받아 감) ──────────────────────────────────
+# 머리말 X-OOT-Export-Key 를 전용 환경값 OOT_EXPORT_KEY 와 비교한다(API_KEY 는 쓰지 않음).
+# 값이 없으면 503(닫힘), 틀리면 401. 비교는 시간차가 새지 않게, 오류 글에 열쇠를 넣지 않는다.
+# 계산은 oot_export 가 자식 프로세스로 한다 — 여기서는 얇게 연결만.
+_EXPORT_ID = re.compile(r"[0-9a-f]{12}")
+
+
+def _require_export_key(x_oot_export_key: Optional[str] = Header(None)) -> None:
+    want = os.environ.get("OOT_EXPORT_KEY", "")
+    if not want:
+        raise HTTPException(503, "넘김 주소가 아직 열리지 않았습니다(열쇠 미설정).")
+    got = (x_oot_export_key or "").encode("utf-8")
+    if not hmac.compare_digest(got, want.encode("utf-8")):
+        raise HTTPException(401, "열쇠가 맞지 않습니다.")
+
+
+@app.get("/api/oot/export/latest", dependencies=[Depends(_require_export_key)])
+def api_oot_export_latest():
+    """현재 머리표 + 마지막 시도 상태(last_attempt). 판이 아직 없으면 404 와 마지막 시도 상태."""
+    try:
+        meta, attempt = oot_export.read_latest()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    if meta is None:
+        return JSONResponse({"detail": "아직 넘김 파일이 없습니다.", "last_attempt": attempt}, status_code=404)
+    return {**meta, "last_attempt": attempt}
+
+
+@app.get("/api/oot/export/{export_id}/rows.jsonl.gz", dependencies=[Depends(_require_export_key)])
+def api_oot_export_rows(export_id: str):
+    """줄 파일(gzip JSON Lines). 판 id 는 12자리 16진수만."""
+    if not _EXPORT_ID.fullmatch(export_id):
+        raise HTTPException(404, "없는 판입니다.")
+    try:
+        data = oot_export.read_rows(export_id)
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    if data is None:
+        raise HTTPException(404, "없는 판입니다.")
+    return Response(content=data, media_type="application/gzip")
+
+
+@app.post("/api/oot/export/run", dependencies=[Depends(_require_export_key)])
+def api_oot_export_run():
+    """넘김 파일 만들기를 자식 프로세스로 띄운다. 이미 도는 중이면 state='running'."""
+    try:
+        return {"state": oot_export.start_child()}
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
 
 
 @app.on_event("startup")
 def _startup_prewarm():
     """기동 시 완제품 품목목록을 백그라운드로 미리 캐시(첫 조회 대기 제거)."""
-    import threading
     threading.Thread(target=core.prewarm, daemon=True).start()
+
+
+@app.on_event("startup")
+def _startup_export_schedule():
+    """넘김 파일 일정 흐름(03:45 KST 이후 하루 한 번) — 열쇠(OOT_EXPORT_KEY)가 있을 때만 띄운다."""
+    if os.environ.get("OOT_EXPORT_KEY"):
+        threading.Thread(target=oot_export.scheduler_loop, daemon=True).start()
 
 
 @app.get("/api/health")

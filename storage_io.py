@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 _ENDPOINT = os.environ.get("STORAGE_ENDPOINT")
@@ -106,3 +107,70 @@ def read_json(path, default=None):
 
 def write_json(path, obj) -> None:
     write_text(path, json.dumps(obj, ensure_ascii=False, indent=2))
+
+
+# ── OOT 넘김 파일(oot_export) 전용 바이트 저장 ─────────────────────────────────
+# 알람 기록·알림 설정(oot-state/)과 다른 앞머리를 쓰고, 정해진 이름 꼴만 받는다 — 지우기·읽기가
+# 운영 설정 파일에 닿지 않게(M5). S3 설정이 있는데 연결 준비에 실패하면 디스크로 넘어가지 않는다.
+_EXPORT_PREFIX = "oot-export/"
+_EXPORT_DIR = os.environ.get("OOT_EXPORT_DIR") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "oot_export_files")
+_EXPORT_FIXED = {"oot_export_latest.json", "oot_export_state.json", "oot_export_index.json",
+                 "oot_export_running.json"}
+_EXPORT_VERSION = re.compile(r"oot_export_[0-9a-f]{12}\.(?:jsonl\.gz|meta\.json)")
+
+
+def export_mode() -> str:
+    """넘김 파일 저장 방식: 's3' · 'disk' · 's3-broken'(S3 설정은 있으나 연결 준비 실패)."""
+    if _s3:
+        return "s3"
+    return "s3-broken" if (_ENDPOINT and _BUCKET) else "disk"
+
+
+def check_export_name(name: str) -> str:
+    """넘김 파일 이름 꼴이 아니면 ValueError(폴더·'..'·다른 파일 이름을 막는다)."""
+    if name in _EXPORT_FIXED or _EXPORT_VERSION.fullmatch(name or ""):
+        return name
+    raise ValueError("넘김 파일 이름이 아닙니다")
+
+
+def _export_ready(name: str) -> str:
+    check_export_name(name)
+    mode = export_mode()
+    if mode == "s3-broken":
+        raise RuntimeError("저장소(S3) 설정은 있으나 연결 준비에 실패했습니다")
+    return mode
+
+
+def export_read(name: str) -> bytes | None:
+    """없으면 None."""
+    if _export_ready(name) == "s3":
+        try:
+            return _s3.get_object(Bucket=_BUCKET, Key=_EXPORT_PREFIX + name)["Body"].read()
+        except Exception:
+            return None
+    path = os.path.join(_EXPORT_DIR, name)
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def export_write(name: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+    if _export_ready(name) == "s3":
+        _s3.put_object(Bucket=_BUCKET, Key=_EXPORT_PREFIX + name, Body=data, ContentType=content_type)
+        return
+    os.makedirs(_EXPORT_DIR, exist_ok=True)
+    tmp = os.path.join(_EXPORT_DIR, name + ".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, os.path.join(_EXPORT_DIR, name))
+
+
+def export_delete(name: str) -> None:
+    if _export_ready(name) == "s3":
+        _s3.delete_object(Bucket=_BUCKET, Key=_EXPORT_PREFIX + name)
+        return
+    path = os.path.join(_EXPORT_DIR, name)
+    if os.path.exists(path):
+        os.remove(path)

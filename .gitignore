@@ -23,3 +23,6 @@ watchdog.log
 .kdp_data_cache.pkl.gz
 sample_OOT_report.xlsx
 *.log
+
+# === OOT 넘김 파일(실데이터 판정 자료) ===
+oot_export_*
