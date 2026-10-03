@@ -344,8 +344,8 @@ def fetch_oot_rows_for_types(test_types: list[str]) -> list[dict]:
     sql = _RESULTS_CTE + f"""
 , scored AS (
   SELECT *,
-    avg(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, TESTITEM_NM) AS MEAN_VALUE,
-    stddev_samp(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, TESTITEM_NM) AS STDDEV_VALUE
+    avg(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, GROUP_NM, TESTITEM_NM) AS MEAN_VALUE,
+    stddev_samp(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, GROUP_NM, TESTITEM_NM) AS STDDEV_VALUE
   FROM ruled
   WHERE RULE_VALUE IS NOT NULL AND ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
     AND BIZPROCESS_NM IN ({placeholders})
@@ -363,7 +363,7 @@ WHERE abs((RULE_VALUE - MEAN_VALUE) / nullif(STDDEV_VALUE, 0)) > 2
         out.append({
             "시험종류": r.get("BIZPROCESS_NM") or "", "품목": r.get("ITEM_NM") or "",
             "품목코드": r.get("ITEM_CD") or "", "제조번호": r.get("LOT_NO") or "",
-            "시험항목": r.get("TESTITEM_NM") or "",
+            "대분류": r.get("GROUP_NM") or "", "시험항목": r.get("TESTITEM_NM") or "",
             "LOT결과_0제외": "" if r.get("RULE_VALUE") is None else str(r["RULE_VALUE"]),
             "OOT_구간분류_히트맵": label,
             "확인_평균": "" if mean_v is None else str(round(float(mean_v), 4)),
@@ -558,10 +558,14 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
     year 미지정/'전체' 시에도 아래 로직이 항상 전 이력 기준으로 자체 재계산한다
     (원천 확인_평균/확인_표준편차는 쓰지 않음 — _row_to_korean 주석 참고).
 
+    평균·σ·연속 규칙은 '대분류+시험항목' 묶음마다 따로 낸다(D-3① — 같은 이름이라도 대분류가 다르면 다른 항목).
+
     반환: (줄 표, 요약) — 줄 표에는 _v·_mu·_sd·_sd_raw·_base_n·_rules·_상태·_ord 칸이 붙는다.
           요약은 {name, years, sample_info}.
     """
     pdf = pdf.copy()
+    if "대분류" not in pdf.columns:
+        pdf["대분류"] = ""
     name = str(pdf.get("품목", pd.Series([""])).iloc[0]) if ("품목" in pdf and len(pdf)) else ""
     val_col = next((c for c in ["LOT결과_0제외", "시험결과_유효", "평균 시험결과"] if c in pdf.columns), None)
     pdf["_상태"] = pdf["OOT_구간분류_히트맵"].map(_oot_status)
@@ -597,8 +601,8 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
     if bool((pdf["_year"] == "기타").any()):
         years.append("기타")
 
-    sample_base = {}   # 시험항목 -> {"n"} (기준선 표본 정보)
-    base = {}          # 시험항목 -> {"mu","sd","sd_raw","R","n"}
+    sample_base = {}   # (대분류, 시험항목) -> {"n"} (기준선 표본 정보)
+    base = {}          # (대분류, 시험항목) -> {"mu","sd","sd_raw","R","n"}
     sample_info = None                 # 상단 표본 안내(로트 기준)
     rule_tags = {}                     # pdf index -> [연속규칙 태그]
     MIN = 20
@@ -617,7 +621,7 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
         # σ 하한(분해능 보정): 보고값이 정수 등으로 반올림돼(예: 수분 24) σ가 측정 분해능보다
         # 작아지면 1단위 차이가 3σ로 과대 판정됨. 분해능 R(서로 다른 값 간 최소 간격)을 σ 하한으로
         # 적용 → 1단위 차이 ≈ 1σ. 연속(잘 분해된) 데이터는 R이 작아 자동 무효(완제품 등 영향 없음).
-        for it, grp in pdf.groupby("시험항목"):
+        for (gr, it), grp in pdf.groupby(["대분류", "시험항목"]):
             vals = grp.loc[grp["_sd_t"] > 0, "_v"].dropna().tolist()
             n = len(vals)
             mu = float(np.mean(vals)) if n >= 2 else float("nan")
@@ -625,18 +629,19 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
             uniq = sorted(set(vals))
             R = min((b - a for a, b in zip(uniq, uniq[1:])), default=0.0)   # 분해능
             sd = max(sd_raw, R) if (n >= 2 and not np.isnan(sd_raw)) else sd_raw
-            base[str(it)] = {"mu": mu, "sd": sd, "sd_raw": sd_raw, "R": R, "n": n}
-            sample_base[str(it)] = {"n": n}
+            base[(str(gr), str(it))] = {"mu": mu, "sd": sd, "sd_raw": sd_raw, "R": R, "n": n}
+            sample_base[(str(gr), str(it))] = {"n": n}
 
-        pdf["_mu"] = pdf["시험항목"].map(lambda it: base.get(str(it), {}).get("mu", float("nan")))
-        pdf["_sd"] = pdf["시험항목"].map(lambda it: base.get(str(it), {}).get("sd", float("nan")))
+        keys = list(zip(pdf["대분류"].astype(str), pdf["시험항목"].astype(str)))
+        pdf["_mu"] = [base.get(k, {}).get("mu", float("nan")) for k in keys]
+        pdf["_sd"] = [base.get(k, {}).get("sd", float("nan")) for k in keys]
         pdf.loc[pdf["_sd_t"] <= 0, "_sd"] = float("nan")        # 정성 행은 제외 유지
 
         # ── 판정: 단일점(±3σ/±2σ) + 관리도 연속 규칙(Western Electric Rule 2·3) ──
         # Rule1: 1점 >3σ = 관리이탈 · Rule2: 연속 3점 중 2점 >2σ(동일방향) = 경향이탈
         # Rule3: 연속 5점 중 4점 >1σ(동일방향) = 경향이탈. 시계열은 제조번호(로트) 오름차순.
         status_map = {}
-        for it, grp in pdf.groupby("시험항목"):
+        for _key, grp in pdf.groupby(["대분류", "시험항목"]):
             q = grp[(grp["_sd"] > 0) & grp["_v"].notna() & grp["_mu"].notna()]
             q = q.sort_values(["_ord", "_rowkey"], kind="mergesort")   # 시간순, 같으면 줄 열쇠순(안정 정렬)
             idx = q.index.tolist()
@@ -662,9 +667,9 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
         pdf["_상태"] = pdf.index.map(lambda i: status_map.get(i, "데이터부족"))
 
     # 줄마다 기준선 정보(σ 원값·표본 수)와 연속 규칙 태그를 붙인다 — 로트 묶기·넘김 파일용.
-    its = pdf["시험항목"].astype(str).tolist()
-    pdf["_sd_raw"] = [base.get(it, {}).get("sd_raw", float("nan")) for it in its]
-    pdf["_base_n"] = pd.Series([sample_base[it]["n"] if it in sample_base else None for it in its],
+    keys = list(zip(pdf["대분류"].astype(str), pdf["시험항목"].astype(str)))
+    pdf["_sd_raw"] = [base.get(k, {}).get("sd_raw", float("nan")) for k in keys]
+    pdf["_base_n"] = pd.Series([sample_base[k]["n"] if k in sample_base else None for k in keys],
                                index=pdf.index, dtype=object)
     pdf["_rules"] = pd.Series([rule_tags.get(i, []) for i in pdf.index], index=pdf.index, dtype=object)
     return pdf, {"name": name, "years": years, "sample_info": sample_info}
@@ -691,7 +696,7 @@ def lots_from_judged(pdf: pd.DataFrame) -> list[dict]:
             floored = bool(sd_raw is not None and not np.isnan(sd_raw)
                            and r["_sd"] and r["_sd"] > sd_raw + 1e-12)
             return {
-                "name": it, "status": r["_상태"],
+                "name": it, "group": str(r.get("대분류", "")), "status": r["_상태"],
                 "val": None if np.isnan(r["_v"]) else round(float(r["_v"]), 4),
                 "mean": None if np.isnan(r["_mu"]) else round(float(r["_mu"]), 4),
                 "sd": None if np.isnan(r["_sd"]) else round(float(r["_sd"]), 4),
@@ -955,10 +960,15 @@ def oot_excel(code: str, test_type: str = "완제품", year: Optional[str] = Non
     wb = Workbook()
     wb.remove(wb.active)
     used: set = set()
-    for item, g in pdf.groupby(pdf["시험항목"].astype(str)):
+    # D-3①: 대분류+시험항목 묶음마다 시트 하나. 같은 이름이 대분류 둘 이상에 있으면 이름 뒤에 (대분류).
+    grp_col = (pdf["대분류"] if "대분류" in pdf.columns else pd.Series("", index=pdf.index)).astype(str).str.strip()
+    item_col = pdf["시험항목"].astype(str)
+    n_groups = grp_col.groupby(item_col.str.strip()).nunique()
+    for (item, group), g in pdf.groupby([item_col, grp_col]):
         item = item.strip()
         if not item:
             continue
+        label = f"{item}({group})" if (group and n_groups.get(item, 1) > 1) else item
         if rule:
             g = g[g["규칙적용값"].astype(str).str.strip() != ""]   # 규칙 적용 값이 있는 줄만
         else:
@@ -978,8 +988,9 @@ def oot_excel(code: str, test_type: str = "완제품", year: Optional[str] = Non
             continue
         specs = [str(x).strip() for x in g.get("시험기준", pd.Series([], dtype=str)).tolist() if str(x).strip()]
         spec = specs[0] if specs else ""
-        cfg = _excel_cfg(_safe_sheet(item, used), name, test_type, item, spec, lots, values)
-        cfg["title"] = f"{name} {test_type} {item} · {yr or '전체'}년".strip()
+        cfg = _excel_cfg(_safe_sheet(label, used), name, test_type, item, spec, lots, values)
+        cfg["검사항목"] = label
+        cfg["title"] = f"{name} {test_type} {label} · {yr or '전체'}년".strip()
         oot_excel_report.build_report(wb, cfg)
     if not wb.sheetnames:
         raise ValueError("엑셀로 만들 유효한 시험항목이 없습니다(정량·2건 이상 필요).")

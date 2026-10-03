@@ -72,7 +72,7 @@ def test_excel_uses_rule_values(fake_dbx, monkeypatch):
     by = {c["sheet"]: c for c in cfgs}
     assert len(by["경도"]["values"]) == len(F.P1_LOTS)
     assert 0.0 not in by["성분나"]["values"]
-    assert 92.0 not in by["성분가"]["values"] and 0.0 not in by["성분가"]["values"]
+    assert 92.0 not in by["성분가(함량)"]["values"] and 0.0 not in by["성분가(함량)"]["values"]
 
 
 def test_ruled_csv_keeps_old_columns_identical():

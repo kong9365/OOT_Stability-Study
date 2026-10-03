@@ -403,20 +403,35 @@ function ootRail() {
   </aside>`;
 }
 
-function ootCompList() {
-  if (!S.lotSummary) return [];
-  const names = new Set();
+// 비교 차트 항목은 대분류+시험항목으로 구별한다(D-3①). 같은 이름이 둘 이상이면 이름 뒤에 '(대분류)'.
+// 반환: Map(표시 이름 -> {name, group})
+function ootCompLabels() {
+  const keys = new Map();
+  if (!S.lotSummary) return keys;
   S.lotSummary.lots.forEach(l => (l.normalItems || []).concat(l.items || []).forEach(it => {
-    if (it.sd != null && it.sd > 0) names.add(it.name);
+    if (it.sd != null && it.sd > 0) keys.set(JSON.stringify([it.group || '', it.name]), { name: it.name, group: it.group || '' });
   }));
-  return [...names].sort((a, b) => a.localeCompare(b, 'ko'));
+  const cnt = {};
+  keys.forEach(v => { cnt[v.name] = (cnt[v.name] || 0) + 1; });
+  const out = new Map();
+  keys.forEach(v => out.set(cnt[v.name] > 1 ? `${v.name} (${v.group})` : v.name, v));
+  return out;
+}
+
+function ootCompList() {
+  return [...ootCompLabels().keys()].sort((a, b) => a.localeCompare(b, 'ko'));
+}
+
+function ootCompItem(label) {
+  return ootCompLabels().get(label) || { name: label, group: null };
 }
 
 function ootCompData(comp) {
   const rows = [];
+  const key = ootCompItem(comp);
   let mean = null, sd = null, specLo = null, specHi = null, spec = null, sdRaw = null, sdFloored = false;
   S.lotSummary.lots.forEach(l => {
-    const it = (l.normalItems || []).concat(l.items || []).find(x => x.name === comp);
+    const it = (l.normalItems || []).concat(l.items || []).find(x => x.name === key.name && (key.group == null || (x.group || '') === key.group));
     if (it && it.val != null) {
       rows.push([l.lot, it.val, l.seq || l.lot]);
       if (mean == null) { mean = it.mean; sd = it.sd; specLo = it.specLo; specHi = it.specHi; spec = it.spec; sdRaw = it.sdRaw; sdFloored = it.sdFloored; }
@@ -439,7 +454,7 @@ async function loadOotStab() {
   if (S.ootStabKey === key && S.ootStabData) { renderOotCompChart(); return; }
   S.ootStabKey = key; S.ootStabLoading = true; renderOotCompChart();
   try {
-    const p = new URLSearchParams({ code: S.code, test_type: S.ootTestType, test_item: S.ootComp, method: 'pooled' });
+    const p = new URLSearchParams({ code: S.code, test_type: S.ootTestType, test_item: ootCompItem(S.ootComp).name, method: 'pooled' });
     if (S.specLow) p.set('spec_low', S.specLow);
     if (S.specHigh) p.set('spec_high', S.specHigh);
     S.ootStabData = await getJSON('/api/stability?' + p);
