@@ -193,6 +193,15 @@ function lotChips() {
   }).join('');
 }
 
+// 조회문 규칙이 계산에서 뺀 줄 각주(서버 lots[].excluded = {까닭: 건수}).
+function excludedNote(lot) {
+  const ex = lot.excluded || {};
+  const parts = [];
+  if (ex['재시험 원값(잠정)']) parts.push(`재시험 원값 ${ex['재시험 원값(잠정)']}건 계산 제외(잠정 규칙: 적부 N/A 원시험 무효)`);
+  if (ex['거짓 0']) parts.push(`거짓 0 ${ex['거짓 0']}건 제외(원문은 숫자인데 저장값만 0)`);
+  return parts.length ? `<div style="font-size:11.5px;color:#9aa4b4;margin-top:6px;line-height:1.5">${parts.map(esc).join('<br>')}</div>` : '';
+}
+
 function normalItemsTable(lot) {
   const items = lot.normalItems || [];
   if (!items.length) return '';
@@ -360,11 +369,11 @@ function ootResults() {
   const ootBlock = lot.items.length ? `<div style="margin-top:18px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:11px"><span style="font-size:14.5px;font-weight:700">OOT 항목</span><span style="font-family:${MONO};font-size:12px;font-weight:600;color:#5b6573;background:#eef1f5;padding:2px 8px;border-radius:6px">${lot.items.length}</span></div>
       <div style="display:flex;flex-direction:column;gap:10px">${items}</div>
-      <div style="font-size:12px;color:#9aa4b4;margin-top:12px;line-height:1.5">정상 ${lot.normal}개 항목 · 정성항목(미생물·확인·성상 등) ${lot.qual}개 σ 판정 제외</div></div>`
+      <div style="font-size:12px;color:#9aa4b4;margin-top:12px;line-height:1.5">정상 ${lot.normal}개 항목 · 정성항목(미생물·확인·성상 등) ${lot.qual}개 σ 판정 제외</div>${excludedNote(lot)}</div>`
     : `<div style="margin-top:18px;background:#fff;border:1px solid #e3e7ee;border-radius:13px;padding:16px 18px;display:flex;align-items:center;gap:10px">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2.4"><path d="M5 12.5 10 17.5 19.5 7"></path></svg>
       <span style="font-size:14px;font-weight:600;color:#15803d">정상 ${lot.normal}개 항목 · OOT 없음</span>
-      <span style="color:#9aa4b4;font-weight:500;margin-left:auto;font-size:12.5px">정성항목 ${lot.qual}개 제외</span></div>`;
+      <span style="color:#9aa4b4;font-weight:500;margin-left:auto;font-size:12.5px">정성항목 ${lot.qual}개 제외</span></div>${excludedNote(lot)}`;
 
   return `<div style="display:flex;gap:18px;align-items:center;padding:22px 24px;border-radius:16px;border:1px solid ${TH.bd};background:${TH.bg};box-shadow:0 1px 3px rgba(20,30,50,.05);flex-wrap:wrap">
       ${icon}

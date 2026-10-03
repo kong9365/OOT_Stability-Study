@@ -116,6 +116,18 @@ def clear_data_cache() -> int:
 # ── Databricks 조회 SQL (수정판 LIMS 결과 — gold 뷰 결함을 bronze에서 직접 보정) ──
 # 상세: Databricks/DATABRICKS_LIMS_INTEGRATION.md §7.1·§7.3. PLANT_CD=005, 차수(ORDER_ID)까지
 # 조인해 중복 제거, 문자 결과는 RESULT_VALUE_NUMBER에서 제외(try_cast 성공 시만 채움).
+#
+# 규칙 단계(ruled) — OOT 결정 규칙(2026-10-04). 저장 숫자 칸 RESULT_VALUE_NUMBER 는 그대로 두고
+# 새 칸 RULE_VALUE(규칙 적용 값)·EXCLUDED_REASON(뺀 까닭)만 더한다. 새 칸은 OOT 경로 넷
+# (화면 oot_lot_summary · 엑셀 oot_excel · 알람 fetch_oot_rows_for_types · 넘김 oot_export)만 쓰고,
+# 안정성 분석·APQR 묶어 보기는 예전 칸을 그대로 읽는다.
+#  ① 거짓 0(D-3③): 원문은 0 아닌 숫자인데 저장 숫자만 0 → 값 비움, 까닭 '거짓 0'
+#  ② 쉼표 숫자: 원문이 그대로는 숫자가 아니지만 쉼표를 뺀 글이 저장 숫자와 같으면 저장 숫자를 씀
+#  ③ 원문에 '분'과 '초'가 함께 있고 저장 숫자가 있는 줄 → 값은 지금처럼 비우고 까닭만 '서식 결과(결정 전)'
+#  ④ D-4 잠정: 같은 품목코드·시험종류·제조번호·대분류·시험항목(안정성은 같은 의뢰번호까지) 안에
+#     적부가 N/A('A')가 아닌 숫자 줄이 있으면, 적부 N/A 숫자 줄은 값 비움, 까닭 '재시험 원값(잠정)'.
+#     홀로 있는 N/A 줄과 제조번호가 빈 줄은 그대로 둔다.
+# 정규식·백슬래시 없이 LIKE·replace·try_cast 만 써서 Databricks 와 오프라인(DuckDB)에서 같은 글로 돈다.
 _RESULTS_CTE = f"""
 WITH results AS (
   SELECT
@@ -126,7 +138,10 @@ WITH results AS (
     try_cast(nullif(trr.REQUEST_DATE,'') AS DATE) AS REQUEST_DATE,
     try_cast(nullif(trr.LOT_DATE,'') AS DATE) AS LOT_DATE,
     try_cast(nullif(trr.EXPIRE_DATE,'') AS DATE) AS EXPIRE_DATE,
-    trr.REQUEST_REMARK
+    trr.REQUEST_REMARK,
+    ttr.RESULT_VALUE AS RESULT_TEXT, ttr.RESULT_VALUE_NUMBER AS RESULT_NUMBER_RAW,
+    trr.REQUEST_NO, trr.REQUEST_ID, tor.ORDER_ID, ttr.TESTITEM_ID, tor.ORDER_SEQ, ttr.TESTITEM_SEQ,
+    ttr.RESULT_YN, ttr.RETEST_ITEM_YN, trr.BIZPROCESS_CD
   FROM `{LIMS_CATALOG}`.bronze.lims_dbo_test_request_receive trr
   LEFT JOIN `{LIMS_CATALOG}`.bronze.lims_dbo_test_order_result tor
     ON tor.PLANT_CD=trr.PLANT_CD AND tor.REQUEST_ID=trr.REQUEST_ID
@@ -141,8 +156,47 @@ WITH results AS (
     PARTITION BY trr.PLANT_CD,trr.REQUEST_ID,tor.ORDER_ID,ttr.TESTITEM_ID
     ORDER BY ttr.UPDATE_TIME DESC, tor.UPDATE_TIME DESC
   )=1
+),
+ruled0 AS (
+  SELECT *,
+    CASE
+      WHEN RESULT_VALUE_NUMBER = 0 AND try_cast(RESULT_TEXT AS DOUBLE) <> 0 THEN NULL
+      WHEN RESULT_VALUE_NUMBER IS NOT NULL THEN RESULT_VALUE_NUMBER
+      WHEN RESULT_NUMBER_RAW IS NOT NULL AND RESULT_TEXT LIKE '%,%'
+        AND try_cast(replace(RESULT_TEXT, ',', '') AS DOUBLE) = CAST(RESULT_NUMBER_RAW AS DOUBLE)
+        THEN RESULT_NUMBER_RAW
+    END AS RULE_VALUE0,
+    CASE
+      WHEN RESULT_VALUE_NUMBER = 0 AND try_cast(RESULT_TEXT AS DOUBLE) <> 0 THEN '거짓 0'
+      WHEN RESULT_VALUE_NUMBER IS NULL AND RESULT_NUMBER_RAW IS NOT NULL
+        AND RESULT_TEXT LIKE '%분%' AND RESULT_TEXT LIKE '%초%' THEN '서식 결과(결정 전)'
+      ELSE ''
+    END AS RULE_REASON0
+  FROM results
+),
+ruled1 AS (
+  SELECT *,
+    max(CASE WHEN RULE_VALUE0 IS NOT NULL AND coalesce(RESULT_YN, '') <> 'A' THEN 1 ELSE 0 END) OVER (
+      PARTITION BY ITEM_CD, BIZPROCESS_NM, LOT_NO, GROUP_NM, TESTITEM_NM,
+        CASE WHEN BIZPROCESS_NM LIKE '%안정성%' THEN REQUEST_NO ELSE '' END
+    ) AS D4_HAS_OTHER
+  FROM ruled0
+),
+ruled AS (
+  SELECT *,
+    CASE WHEN D4_HAS_OTHER = 1 AND RULE_VALUE0 IS NOT NULL AND coalesce(RESULT_YN, '') = 'A'
+      AND trim(coalesce(LOT_NO, '')) <> '' THEN NULL ELSE RULE_VALUE0 END AS RULE_VALUE,
+    CASE WHEN D4_HAS_OTHER = 1 AND RULE_VALUE0 IS NOT NULL AND coalesce(RESULT_YN, '') = 'A'
+      AND trim(coalesce(LOT_NO, '')) <> '' THEN '재시험 원값(잠정)' ELSE RULE_REASON0 END AS EXCLUDED_REASON
+  FROM ruled1
 )
 """
+
+# 조회문 규칙이 계산에서 뺀 줄의 까닭(서식 결과는 값이 원래 비어 있어 따로 떼지 않는다).
+OOT_EXCLUDE_REASONS = ("거짓 0", "재시험 원값(잠정)")
+RULE_NOTE = ("재시험 원값(잠정 규칙): LIMS 적부가 N/A 인 원시험 값은, 같은 제조번호·대분류·시험항목"
+             "(안정성은 같은 의뢰)에 다른 숫자 결과가 있으면 계산에서 뺍니다. 재시험 최종 표시를 "
+             "받기 전까지 쓰는 잠정 규칙입니다.")
 
 
 def _sql_literal(value: str) -> str:
@@ -155,10 +209,16 @@ def _row_to_korean(r: dict) -> dict:
     확인_평균·확인_표준편차·OOT_구간분류_히트맵은 Tableau 계산 필드였던 자리로, 이 값들은
     kdp_core의 사업 로직(oot_lot_summary 등)이 선택 연도 범위로 항상 자체 재계산하므로
     여기서는 '정량(수치) 결과 여부' 플래그로만 채운다(1=정량, 0=정성/결과없음).
+
+    뒤쪽 칸(결과원문~시험종류코드)은 조회문 규칙 단계가 더한 것이다. OOT 경로만 읽고,
+    안정성·APQR 은 읽지 않는다(_RESULTS_CTE 주석).
     """
     v = r.get("RESULT_VALUE_NUMBER")
     is_quant = v is not None
     vs = "" if v is None else str(v)
+
+    def _s(x) -> str:
+        return "" if x is None else str(x)
     return {
         "품목코드": r.get("ITEM_CD") or "", "품목": r.get("ITEM_NM") or "",
         "제조번호": r.get("LOT_NO") or "", "시험항목": r.get("TESTITEM_NM") or "",
@@ -167,12 +227,22 @@ def _row_to_korean(r: dict) -> dict:
         "OOT_구간분류_히트맵": "",
         "의뢰일자": r.get("REQUEST_DATE") or "", "제조일자": r.get("LOT_DATE") or "",
         "유효기한": r.get("EXPIRE_DATE") or "", "의뢰 특이사항": r.get("REQUEST_REMARK") or "",
+        "결과원문": _s(r.get("RESULT_TEXT")), "저장숫자원값": _s(r.get("RESULT_NUMBER_RAW")),
+        "규칙적용값": _s(r.get("RULE_VALUE")), "뺀까닭": _s(r.get("EXCLUDED_REASON")),
+        "의뢰번호": _s(r.get("REQUEST_NO")), "REQUEST_ID": _s(r.get("REQUEST_ID")),
+        "ORDER_ID": _s(r.get("ORDER_ID")), "TESTITEM_ID": _s(r.get("TESTITEM_ID")),
+        "차수": _s(r.get("ORDER_SEQ")), "순번": _s(r.get("TESTITEM_SEQ")),
+        "적부": _s(r.get("RESULT_YN")), "재시험": _s(r.get("RETEST_ITEM_YN")),
+        "시험종류코드": _s(r.get("BIZPROCESS_CD")),
     }
 
 
 _FULL_FIELDS = ["품목코드", "품목", "제조번호", "시험항목", "대분류", "시험기준",
                "LOT결과_0제외", "확인_평균", "확인_표준편차", "OOT_구간분류_히트맵",
-               "의뢰일자", "제조일자", "유효기한", "의뢰 특이사항"]
+               "의뢰일자", "제조일자", "유효기한", "의뢰 특이사항",
+               "결과원문", "저장숫자원값", "규칙적용값", "뺀까닭", "의뢰번호",
+               "REQUEST_ID", "ORDER_ID", "TESTITEM_ID", "차수", "순번", "적부", "재시험",
+               "시험종류코드"]
 
 
 def _rows_to_csv(rows: list[dict], fields: list[str]) -> str:
@@ -194,7 +264,7 @@ def _fetch_csv(params: dict) -> str:
     item_code = params.get("vf_품목코드")
     if item_code:
         clauses, sql_params = ["BIZPROCESS_NM = :tt", "ITEM_CD = :code"], {"tt": test_type, "code": item_code}
-        sql = _RESULTS_CTE + "SELECT * FROM results WHERE " + " AND ".join(clauses)
+        sql = _RESULTS_CTE + "SELECT * FROM ruled WHERE " + " AND ".join(clauses)
         rows = [_row_to_korean(r) for r in dbx.query(sql, sql_params)]
         return _rows_to_csv(rows, _FULL_FIELDS)
     # 품목 목록만 필요(oot_products) — 전체 조인 없이 가벼운 DISTINCT 조회.
@@ -216,7 +286,8 @@ ORDER BY ITEM_CD
 
 def _view_csv(params: dict) -> str:
     """조회 결과 CSV — 인메모리 TTL 캐시. 같은 params 재조회는 즉시(네트워크 생략)."""
-    key = "|".join(f"{k}={v}" for k, v in sorted(params.items()))
+    # 'v2': 규칙 칸이 없는 예전 디스크 임시 저장분을 읽지 않게 하는 판 표시.
+    key = "v2|" + "|".join(f"{k}={v}" for k, v in sorted(params.items()))
     now = time.time()
     with _LOCK:
         hit = _DATA_CACHE.get(key)
@@ -264,6 +335,7 @@ def fetch_oot_rows_for_types(test_types: list[str]) -> list[dict]:
     실제 평균·표준편차를 계산해 돌려준다(기존 Tableau 'OOT_구간분류_히트맵'과 동일한 역할).
 
     반환: 기존 Tableau CSV와 동일한 한글 키 dict 목록(+시험종류), ±2σ 이내(정상)는 제외.
+    값은 조회문 규칙 단계의 RULE_VALUE(거짓 0·D-4 잠정은 빠지고 쉼표 숫자는 들어옴)를 쓴다.
     """
     if not test_types:
         return []
@@ -272,14 +344,14 @@ def fetch_oot_rows_for_types(test_types: list[str]) -> list[dict]:
     sql = _RESULTS_CTE + f"""
 , scored AS (
   SELECT *,
-    avg(RESULT_VALUE_NUMBER) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, TESTITEM_NM) AS MEAN_VALUE,
-    stddev_samp(RESULT_VALUE_NUMBER) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, TESTITEM_NM) AS STDDEV_VALUE
-  FROM results
-  WHERE RESULT_VALUE_NUMBER IS NOT NULL AND ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
+    avg(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, TESTITEM_NM) AS MEAN_VALUE,
+    stddev_samp(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, TESTITEM_NM) AS STDDEV_VALUE
+  FROM ruled
+  WHERE RULE_VALUE IS NOT NULL AND ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
     AND BIZPROCESS_NM IN ({placeholders})
 )
-SELECT *, (RESULT_VALUE_NUMBER - MEAN_VALUE) / nullif(STDDEV_VALUE, 0) AS Z_SCORE FROM scored
-WHERE abs((RESULT_VALUE_NUMBER - MEAN_VALUE) / nullif(STDDEV_VALUE, 0)) > 2
+SELECT *, (RULE_VALUE - MEAN_VALUE) / nullif(STDDEV_VALUE, 0) AS Z_SCORE FROM scored
+WHERE abs((RULE_VALUE - MEAN_VALUE) / nullif(STDDEV_VALUE, 0)) > 2
 """
     rows = dbx.query(sql, params)
     out = []
@@ -292,7 +364,7 @@ WHERE abs((RESULT_VALUE_NUMBER - MEAN_VALUE) / nullif(STDDEV_VALUE, 0)) > 2
             "시험종류": r.get("BIZPROCESS_NM") or "", "품목": r.get("ITEM_NM") or "",
             "품목코드": r.get("ITEM_CD") or "", "제조번호": r.get("LOT_NO") or "",
             "시험항목": r.get("TESTITEM_NM") or "",
-            "LOT결과_0제외": "" if r.get("RESULT_VALUE_NUMBER") is None else str(r["RESULT_VALUE_NUMBER"]),
+            "LOT결과_0제외": "" if r.get("RULE_VALUE") is None else str(r["RULE_VALUE"]),
             "OOT_구간분류_히트맵": label,
             "확인_평균": "" if mean_v is None else str(round(float(mean_v), 4)),
             "확인_표준편차": "" if sd_v is None else str(round(float(sd_v), 4)),
@@ -490,13 +562,24 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
           요약은 {name, years, sample_info}.
     """
     pdf = pdf.copy()
-    name = str(pdf.get("품목", pd.Series([""])).iloc[0]) if "품목" in pdf else ""
+    name = str(pdf.get("품목", pd.Series([""])).iloc[0]) if ("품목" in pdf and len(pdf)) else ""
     val_col = next((c for c in ["LOT결과_0제외", "시험결과_유효", "평균 시험결과"] if c in pdf.columns), None)
     pdf["_상태"] = pdf["OOT_구간분류_히트맵"].map(_oot_status)
     pdf["_sd_t"] = pdf["확인_표준편차"].map(_num)          # Tableau σ(정량 판별용)
     pdf["_sd"] = pdf["_sd_t"]
     pdf["_mu"] = pdf["확인_평균"].map(_num)
     pdf["_v"] = pdf[val_col].map(_num) if val_col else float("nan")
+    if "규칙적용값" in pdf.columns:
+        # 조회문 규칙 단계를 거친 값(쉼표 숫자는 들어오고 거짓 0·D-4 잠정은 빠짐)으로 계산 — OOT 경로만.
+        pdf["_sd_t"] = pdf["규칙적용값"].map(lambda s: 1.0 if str(s).strip() else 0.0)
+        pdf["_sd"] = pdf["_sd_t"]
+        pdf["_v"] = pdf["규칙적용값"].map(_num)
+    # 줄 열쇠(의뢰·차수·시험항목 번호) — 같은 날·같은 로트 줄의 순서를 실행마다 같게 한다.
+    if {"REQUEST_ID", "ORDER_ID", "TESTITEM_ID"} <= set(pdf.columns):
+        pdf["_rowkey"] = (pdf["REQUEST_ID"].astype(str) + "|" + pdf["ORDER_ID"].astype(str) + "|"
+                          + pdf["TESTITEM_ID"].astype(str))
+    else:
+        pdf["_rowkey"] = ""
     pdf["_year"] = pdf["제조번호"].astype(str).map(_year_of)
     # 시계열 정렬키(_ord): 의뢰일자(원료 등 제조번호 채번이 불규칙한 경우) 우선, 없으면 제조번호.
     # 원료시험은 제조번호가 M25-002/ZA0262302처럼 혼재 → 의뢰일자순이 실제 접수 순서.
@@ -555,7 +638,7 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
         status_map = {}
         for it, grp in pdf.groupby("시험항목"):
             q = grp[(grp["_sd"] > 0) & grp["_v"].notna() & grp["_mu"].notna()]
-            q = q.sort_values("_ord")                           # 시간순(의뢰일자/제조번호 오름차순)
+            q = q.sort_values(["_ord", "_rowkey"], kind="mergesort")   # 시간순, 같으면 줄 열쇠순(안정 정렬)
             idx = q.index.tolist()
             zs = ((q["_v"] - q["_mu"]) / q["_sd"]).tolist()
             r2, r3 = _we_run_rules(zs)
@@ -646,9 +729,43 @@ def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str]
     pdf = _product_df(code, test_type)
     if pdf.empty or "제조번호" not in pdf.columns:
         return {"code": code, "name": "", "lots": [], "years": ["전체"]}
-    judged, info = judge_rows(pdf, year)
-    return {"code": code, "name": info["name"], "lots": lots_from_judged(judged),
-            "years": ["전체"] + info["years"], "sampleInfo": info["sample_info"]}
+    kept, dropped = split_excluded(pdf)                # 정성 개수에 섞이지 않게 먼저 떼어 낸다
+    judged, info = judge_rows(kept, year)
+    lots = lots_from_judged(judged)
+    excluded, per_lot = _excluded_summary(dropped, year)
+    for lot in lots:
+        lot["excluded"] = per_lot.get(lot["lot"], {})
+    return {"code": code, "name": info["name"], "lots": lots,
+            "years": ["전체"] + info["years"], "sampleInfo": info["sample_info"],
+            "excluded": excluded, "ruleNote": RULE_NOTE}
+
+
+def split_excluded(pdf: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """조회문 규칙이 계산에서 뺀 줄(거짓 0 · 재시험 원값(잠정))을 떼어 낸다. (남길 줄, 뺀 줄)."""
+    if "뺀까닭" not in pdf.columns:
+        return pdf, pdf.iloc[0:0]
+    mask = pdf["뺀까닭"].isin(OOT_EXCLUDE_REASONS)
+    return pdf[~mask], pdf[mask]
+
+
+def _excluded_summary(dropped: pd.DataFrame, year: Optional[str]) -> tuple[dict, dict]:
+    """뺀 줄 → ({까닭: [줄...]}, {제조번호: {까닭: 개수}}). 연도를 고르면 그 해 로트만."""
+    yr = year if (year and year != "전체") else None
+    out: dict[str, list] = {}
+    per_lot: dict[str, dict] = {}
+    for _, r in dropped.iterrows():
+        lot = str(r.get("제조번호", "")).strip()
+        if yr and _year_of(lot) != yr:
+            continue
+        reason = str(r["뺀까닭"])
+        out.setdefault(reason, []).append({
+            "lot": lot, "group": str(r.get("대분류", "")), "name": str(r.get("시험항목", "")),
+            "text": str(r.get("결과원문", "")), "raw": str(r.get("저장숫자원값", ""))})
+        cnt = per_lot.setdefault(lot, {})
+        cnt[reason] = cnt.get(reason, 0) + 1
+    for rows in out.values():
+        rows.sort(key=lambda x: (x["lot"], x["group"], x["name"], x["text"]))
+    return out, per_lot
 
 
 # ── 동일품목군 (APQR 풀링 OOT) ────────────────────────────────────────────────
@@ -829,7 +946,11 @@ def oot_excel(code: str, test_type: str = "완제품", year: Optional[str] = Non
     if pdf.empty or "제조번호" not in pdf.columns:
         raise ValueError("데이터가 없습니다.")
     name = str(pdf.get("품목", pd.Series([""])).iloc[0]) if "품목" in pdf else ""
+    pdf, _ = split_excluded(pdf)                       # 거짓 0 · 재시험 원값(잠정)은 엑셀에서도 뺀다
     val_col = next((c for c in ["LOT결과_0제외", "시험결과_유효", "평균 시험결과"] if c in pdf.columns), None)
+    rule = "규칙적용값" in pdf.columns
+    if rule:
+        val_col = "규칙적용값"
     yr = year if (year and year != "전체") else None
     wb = Workbook()
     wb.remove(wb.active)
@@ -838,7 +959,10 @@ def oot_excel(code: str, test_type: str = "완제품", year: Optional[str] = Non
         item = item.strip()
         if not item:
             continue
-        g = g[g["확인_표준편차"].map(_num) > 0]            # 정량만(σ_t>0)
+        if rule:
+            g = g[g["규칙적용값"].astype(str).str.strip() != ""]   # 규칙 적용 값이 있는 줄만
+        else:
+            g = g[g["확인_표준편차"].map(_num) > 0]            # 정량만(σ_t>0)
         if yr:
             g = g[g["제조번호"].astype(str).map(_year_of) == yr]
         if g.empty:
