@@ -478,21 +478,18 @@ def _we_run_rules(zs: list) -> tuple:
     return r2, r3
 
 
-def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str] = None) -> dict:
-    """선택 품목의 LOT별 판정 요약. 한 번의 Databricks 호출로 전 LOT 계산.
+def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFrame, dict]:
+    """줄별 판정(반올림 전 값). 화면(oot_lot_summary)과 넘김 파일(oot_export)이 함께 쓴다.
 
     year 지정('전체' 제외) 시: 해당 연도(제조번호 앞 2자리) LOT만 대상으로
     시험항목별 평균·±3σ를 재계산해 OOT를 재판정(APQR 연도별 관점).
     year 미지정/'전체' 시에도 아래 로직이 항상 전 이력 기준으로 자체 재계산한다
     (원천 확인_평균/확인_표준편차는 쓰지 않음 — _row_to_korean 주석 참고).
 
-    반환: {code, name, lots:[{lot, year, normal, warn, crit, qual, flagged,
-            items:[{name, val, mean, sd, z, status}]}], years:[...]}
+    반환: (줄 표, 요약) — 줄 표에는 _v·_mu·_sd·_sd_raw·_base_n·_rules·_상태·_ord 칸이 붙는다.
+          요약은 {name, years, sample_info}.
     """
-    pdf = _product_df(code, test_type)
-    if pdf.empty or "제조번호" not in pdf.columns:
-        return {"code": code, "name": "", "lots": [], "years": ["전체"]}
-
+    pdf = pdf.copy()
     name = str(pdf.get("품목", pd.Series([""])).iloc[0]) if "품목" in pdf else ""
     val_col = next((c for c in ["LOT결과_0제외", "시험결과_유효", "평균 시험결과"] if c in pdf.columns), None)
     pdf["_상태"] = pdf["OOT_구간분류_히트맵"].map(_oot_status)
@@ -581,6 +578,17 @@ def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str]
                     rule_tags[ix] = tags
         pdf["_상태"] = pdf.index.map(lambda i: status_map.get(i, "데이터부족"))
 
+    # 줄마다 기준선 정보(σ 원값·표본 수)와 연속 규칙 태그를 붙인다 — 로트 묶기·넘김 파일용.
+    its = pdf["시험항목"].astype(str).tolist()
+    pdf["_sd_raw"] = [base.get(it, {}).get("sd_raw", float("nan")) for it in its]
+    pdf["_base_n"] = pd.Series([sample_base[it]["n"] if it in sample_base else None for it in its],
+                               index=pdf.index, dtype=object)
+    pdf["_rules"] = pd.Series([rule_tags.get(i, []) for i in pdf.index], index=pdf.index, dtype=object)
+    return pdf, {"name": name, "years": years, "sample_info": sample_info}
+
+
+def lots_from_judged(pdf: pd.DataFrame) -> list[dict]:
+    """judge_rows 결과를 LOT 별로 묶는다(화면 응답의 lots). 최신(의뢰일자/제조번호)순."""
     lots = []
     for lot, g in pdf.groupby(pdf["제조번호"].astype(str)):
         lot = str(lot).strip()
@@ -595,10 +603,8 @@ def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str]
         def _item(r):
             z = (r["_v"] - r["_mu"]) / r["_sd"] if r["_sd"] else float("nan")
             it = str(r.get("시험항목", ""))
-            sb = sample_base.get(it)
-            bs = base.get(it, {})
             spec_lo, spec_hi = parse_criterion(r.get("시험기준"))   # 규격 하한·상한(관리도 기준선용)
-            sd_raw = bs.get("sd_raw")
+            sd_raw = r["_sd_raw"]
             floored = bool(sd_raw is not None and not np.isnan(sd_raw)
                            and r["_sd"] and r["_sd"] > sd_raw + 1e-12)
             return {
@@ -609,8 +615,8 @@ def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str]
                 "sdRaw": (None if (sd_raw is None or np.isnan(sd_raw)) else round(float(sd_raw), 4)),
                 "sdFloored": floored,                      # 분해능 σ 하한 적용 여부
                 "z": None if np.isnan(z) else round(float(z), 3),
-                "baseN": (sb["n"] if sb else None),        # 기준선 표본수
-                "rules": rule_tags.get(r.name, []),        # 연속규칙 태그(경향이탈)
+                "baseN": r["_base_n"],                     # 기준선 표본수
+                "rules": r["_rules"],                      # 연속규칙 태그(경향이탈)
                 "specLo": spec_lo, "specHi": spec_hi,      # 규격 하한/상한(mg 등)
                 "spec": (str(r.get("시험기준")).strip() if r.get("시험기준") is not None else None),
             }
@@ -626,8 +632,23 @@ def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str]
                      "seq": seq, "items": items, "normalItems": normal_items})
 
     lots.sort(key=lambda l: l["seq"], reverse=True)              # 최신(의뢰일자/제조번호)순
-    return {"code": code, "name": name, "lots": lots, "years": ["전체"] + years,
-            "sampleInfo": sample_info}
+    return lots
+
+
+def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str] = None) -> dict:
+    """선택 품목의 LOT별 판정 요약. 한 번의 Databricks 호출로 전 LOT 계산.
+
+    계산은 judge_rows(줄별 판정) → lots_from_judged(LOT 묶기). year 뜻은 judge_rows 참고.
+
+    반환: {code, name, lots:[{lot, year, normal, warn, crit, qual, flagged,
+            items:[{name, val, mean, sd, z, status}]}], years:[...]}
+    """
+    pdf = _product_df(code, test_type)
+    if pdf.empty or "제조번호" not in pdf.columns:
+        return {"code": code, "name": "", "lots": [], "years": ["전체"]}
+    judged, info = judge_rows(pdf, year)
+    return {"code": code, "name": info["name"], "lots": lots_from_judged(judged),
+            "years": ["전체"] + info["years"], "sampleInfo": info["sample_info"]}
 
 
 # ── 동일품목군 (APQR 풀링 OOT) ────────────────────────────────────────────────
