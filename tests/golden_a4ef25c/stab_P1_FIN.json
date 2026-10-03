@@ -1,0 +1,1468 @@
+{
+ "ok": true,
+ "code": "10001",
+ "testType": "완제품",
+ "testItem": "성분가",
+ "testItems": [
+  "경도",
+  "붕해",
+  "성분가",
+  "성분나",
+  "유연물질"
+ ],
+ "batch": null,
+ "method": "pooled",
+ "specLow": 95.0,
+ "specHigh": 105.0,
+ "unit": "%",
+ "specText": "95 ~ 105 %",
+ "accelerated": false,
+ "accelNote": null,
+ "batchCount": 49,
+ "pairCount": 52,
+ "approvedMonths": 36,
+ "approvedShort": false,
+ "batches": [
+  {
+   "batch": "",
+   "color": "#E5310F",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     100.3
+    ],
+    [
+     0.0,
+     100.1
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 2,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23001",
+   "color": "#1F7A52",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     94.9
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23001",
+   "color": "#B8893B",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     100.8
+    ],
+    [
+     0.0,
+     0.0
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 2,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23002",
+   "color": "#2563eb",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     96.1
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23002",
+   "color": "#9333ea",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     98.5
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23003",
+   "color": "#0891b2",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     95.0
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23003",
+   "color": "#E5310F",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     100.0
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23004",
+   "color": "#1F7A52",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     98.8
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23004",
+   "color": "#B8893B",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     100.4
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23005",
+   "color": "#2563eb",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     93.0
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23005",
+   "color": "#9333ea",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     98.8
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23006",
+   "color": "#0891b2",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     96.5
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23006",
+   "color": "#E5310F",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     101.9
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23007",
+   "color": "#1F7A52",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     94.0
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23007",
+   "color": "#B8893B",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     92.0
+    ],
+    [
+     0.0,
+     100.7
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 2,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23008",
+   "color": "#2563eb",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     92.1
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23008",
+   "color": "#9333ea",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     99.4
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23009",
+   "color": "#0891b2",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     94.0
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23009",
+   "color": "#E5310F",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     100.9
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23010",
+   "color": "#1F7A52",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     93.7
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23010",
+   "color": "#B8893B",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     104.5
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23011",
+   "color": "#2563eb",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     95.5
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23011",
+   "color": "#9333ea",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     98.8
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23012",
+   "color": "#0891b2",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     93.2
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23012",
+   "color": "#E5310F",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     100.8
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23013",
+   "color": "#1F7A52",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     96.7
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23013",
+   "color": "#B8893B",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     101.1
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23014",
+   "color": "#2563eb",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     96.8
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "23014",
+   "color": "#9333ea",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     101.1
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24001",
+   "color": "#0891b2",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     94.0
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24001",
+   "color": "#E5310F",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     99.5
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24002",
+   "color": "#1F7A52",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     97.5
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24002",
+   "color": "#B8893B",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     99.1
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24003",
+   "color": "#2563eb",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     93.4
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24003",
+   "color": "#9333ea",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     98.4
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24004",
+   "color": "#0891b2",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     93.3
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24004",
+   "color": "#E5310F",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     98.3
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24005",
+   "color": "#1F7A52",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     94.2
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24005",
+   "color": "#B8893B",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     102.2
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24006",
+   "color": "#2563eb",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     97.9
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24006",
+   "color": "#9333ea",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     101.3
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24007",
+   "color": "#0891b2",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     95.7
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24007",
+   "color": "#E5310F",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     99.3
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24008",
+   "color": "#1F7A52",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     98.0
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24008",
+   "color": "#B8893B",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     100.3
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24009",
+   "color": "#2563eb",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     93.8
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24009",
+   "color": "#9333ea",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     101.2
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24010",
+   "color": "#0891b2",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     95.9
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  },
+  {
+   "batch": "24010",
+   "color": "#E5310F",
+   "approved": 36,
+   "pts": [
+    [
+     0.0,
+     100.8
+    ]
+   ],
+   "slope": null,
+   "intercept": null,
+   "r2": null,
+   "n": 1,
+   "se": null,
+   "tcrit": null,
+   "mx": 0.0,
+   "sxx": 0.0,
+   "shelf": null,
+   "trend": "데이터 부족",
+   "lastT": 0.0,
+   "limit": "-",
+   "steps": [
+    {
+     "k": "note",
+     "v": "회귀에는 최소 3개 시점이 필요합니다."
+    }
+   ]
+  }
+ ],
+ "worst": null,
+ "sigma": null,
+ "sigmaBase": "통합 잔차오차",
+ "tpBatch": "",
+ "tpRows": [],
+ "nOot": 0,
+ "nWarn": 0,
+ "ancova": null
+}
