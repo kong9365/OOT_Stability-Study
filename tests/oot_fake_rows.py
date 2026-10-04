@@ -4,8 +4,9 @@
 실제 자료가 아니다. 품목·제조번호·값은 모두 지어낸 것이다(사람 이름·사번 없음).
 - plain_rows(): 규칙에 걸리는 줄이 없고, 시험항목마다 대분류가 하나뿐인 자료.
 - rule_rows(): plain 에 규칙에 걸리는 줄(거짓 0 · 쉼표 숫자 · 분초 서식 · 적부 N/A 원시험 ·
-  같은 이름 다른 대분류)을 더한 자료. 각 줄의 RULE_VALUE · EXCLUDED_REASON 은 조회문 규칙이
-  내야 할 답을 손으로 적은 것이다.
+  같은 이름 다른 대분류)을 더한 자료. 각 줄의 RULE_VALUE · EXCLUDED_REASON 은 알람·넘김 조회문
+  (_OOT_CTE, D-4 잠정까지)이 내야 할 답을 손으로 적은 것이다.
+- row_rules_only(): 같은 줄을 공통 조회문(_COMMON_CTE, 줄 하나 규칙만 — D-4 전)이 돌려줄 꼴로.
 
 숫자는 Databricks 의 decimal(17,6) 처럼 Decimal 로 돌려준다(화면 CSV 의 글자 꼴을 맞추려고).
 """
@@ -181,12 +182,36 @@ def rule_rows() -> list[dict]:
     return _build(True)
 
 
+D4_REASON = "재시험 원값(잠정)"
+
+
+def row_rules_only(rows: list[dict]) -> list[dict]:
+    """공통 조회문(_COMMON_CTE) 꼴 — D-4 잠정을 적용하기 전.
+
+    D-4 로 비운 줄은 줄 하나 규칙 값으로 되돌린다. 그런 줄은 거짓 0 이 아니므로(거짓 0 이면 값이
+    원래 비어 D-4 에 걸리지 않음) 그 값은 저장 숫자, 저장 숫자가 비었으면 쉼표로 되살린 원값이다.
+    """
+    out = []
+    for r in rows:
+        r = dict(r)
+        if r["EXCLUDED_REASON"] == D4_REASON:
+            num = r["RESULT_VALUE_NUMBER"]
+            r["RULE_VALUE"] = num if num is not None else r["RESULT_NUMBER_RAW"]
+            r["EXCLUDED_REASON"] = ""
+        out.append(r)
+    return out
+
+
 def fake_query(rows: list[dict]):
-    """databricks_client.query 를 흉내낸다. 품목 조회(:tt·:code)만 걸러서 돌려준다."""
+    """databricks_client.query 를 흉내낸다. 품목 조회(:tt·:code)만 걸러서 돌려준다.
+
+    품목 조회는 공통 조회문(D-4 전)이어야 한다 — 창 함수가 들어 있으면 멈춘다(M1).
+    """
     def _q(sql, params=None, large=False):
         params = params or {}
         if "code" in params:
-            return [dict(r) for r in rows
+            assert "D4_HAS_OTHER" not in sql and sql.count("OVER (") == 1, "품목 조회에 D-4 창 함수"
+            return [r for r in row_rules_only(rows)
                     if r["ITEM_CD"] == params["code"] and r["BIZPROCESS_NM"] == params["tt"]]
         if "SELECT DISTINCT trr.ITEM_CD" in sql:
             seen = {}

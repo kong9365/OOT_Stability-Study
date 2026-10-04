@@ -83,21 +83,24 @@ def write_snapshot(root, rows):
 
 @needs_duckdb
 def test_rule_sql_gives_expected_answers(tmp_path):
-    """조회문 규칙(거짓 0 · 쉼표 · 분초 · D-4 잠정 · 빈 제조번호 · 홀로 있는 N/A)이 손으로 적은 답과 같다."""
+    """조회문 규칙(거짓 0 · 쉼표 · 분초 · D-4 잠정 · 빈 제조번호 · 홀로 있는 N/A)이 손으로 적은 답과 같다.
+
+    알람·넘김 조회문(_OOT_CTE)은 D-4 까지, 공통 조회문(_COMMON_CTE)은 D-4 전(row_rules_only)의 답.
+    """
     import kdp_core
     import offline_dbx
-    rows = F.rule_rows()
-    write_snapshot(str(tmp_path), rows)
+    write_snapshot(str(tmp_path), F.rule_rows())
     q = offline_dbx.make_query(str(tmp_path))
-    got = {r["TESTITEM_ID"]: r for r in q(kdp_core._RESULTS_CTE + "SELECT * FROM ruled")}
-    assert len(got) == len(rows)
-    n_results = q(kdp_core._RESULTS_CTE + "SELECT count(*) AS N FROM results")[0]["N"]
-    assert n_results == len(rows)                     # 규칙 단계는 줄을 걸러내지 않는다
-    for r in rows:
-        g = got[r["TESTITEM_ID"]]
-        assert g["RESULT_VALUE_NUMBER"] == r["RESULT_VALUE_NUMBER"], r     # 저장 숫자 칸은 예전 그대로
-        assert g["RULE_VALUE"] == r["RULE_VALUE"], r
-        assert g["EXCLUDED_REASON"] == r["EXCLUDED_REASON"], r
+    n_results = q(kdp_core._RESULTS_CTE + " SELECT count(*) AS N FROM results")[0]["N"]
+    assert n_results == len(F.rule_rows())            # 규칙 단계는 줄을 걸러내지 않는다
+    for cte, rows in ((kdp_core._OOT_CTE, F.rule_rows()), (kdp_core._COMMON_CTE, F.row_rules_only(F.rule_rows()))):
+        got = {r["TESTITEM_ID"]: r for r in q(cte + "SELECT * FROM ruled")}
+        assert len(got) == len(rows)
+        for r in rows:
+            g = got[r["TESTITEM_ID"]]
+            assert g["RESULT_VALUE_NUMBER"] == r["RESULT_VALUE_NUMBER"], r     # 저장 숫자 칸은 예전 그대로
+            assert g["RULE_VALUE"] == r["RULE_VALUE"], r
+            assert g["EXCLUDED_REASON"] == r["EXCLUDED_REASON"], r
 
 
 @needs_duckdb

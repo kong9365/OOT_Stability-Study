@@ -127,6 +127,12 @@ def clear_data_cache() -> int:
 #  ④ D-4 잠정: 같은 품목코드·시험종류·제조번호·대분류·시험항목(안정성은 같은 의뢰번호까지) 안에
 #     적부가 N/A('A')가 아닌 숫자 줄이 있으면, 적부 N/A 숫자 줄은 값 비움, 까닭 '재시험 원값(잠정)'.
 #     홀로 있는 N/A 줄과 제조번호가 빈 줄은 그대로 둔다.
+# 조회문은 둘이다. 앞부분(_RESULTS_CTE: 중복 지우기 + ①~③ 줄 하나 규칙)은 같다.
+#  - _COMMON_CTE: 화면·엑셀·안정성·APQR 이 함께 쓰는 품목 조회(_fetch_csv). ①~③ 만 — 칸만 더하므로
+#    a4ef25c 와 실행 모양이 같다(창 함수는 중복 지우기 하나뿐). ④ 의 창 함수를 여기에 넣으면
+#    Databricks 가 돌려주는 줄 순서가 바뀌고, 첫 줄을 골라 쓰는 안정성·APQR 응답이 바뀐다(M1).
+#    화면·엑셀의 ④ 는 apply_d4 가 pandas 로 같은 규칙을 낸다.
+#  - _OOT_CTE: 알람(fetch_oot_rows_for_types)·넘김(oot_export) 전용. 각자 따로 묻는 조회문이라 ④ 까지 낸다.
 # 정규식·백슬래시 없이 LIKE·replace·try_cast 만 써서 Databricks 와 오프라인(DuckDB)에서 같은 글로 돈다.
 _RESULTS_CTE = f"""
 WITH results AS (
@@ -173,7 +179,15 @@ ruled0 AS (
       ELSE ''
     END AS RULE_REASON0
   FROM results
-),
+)"""
+
+_COMMON_CTE = _RESULTS_CTE + """,
+ruled AS (
+  SELECT *, RULE_VALUE0 AS RULE_VALUE, RULE_REASON0 AS EXCLUDED_REASON FROM ruled0
+)
+"""
+
+_OOT_CTE = _RESULTS_CTE + """,
 ruled1 AS (
   SELECT *,
     max(CASE WHEN RULE_VALUE0 IS NOT NULL AND coalesce(RESULT_YN, '') <> 'A' THEN 1 ELSE 0 END) OVER (
@@ -264,7 +278,7 @@ def _fetch_csv(params: dict) -> str:
     item_code = params.get("vf_품목코드")
     if item_code:
         clauses, sql_params = ["BIZPROCESS_NM = :tt", "ITEM_CD = :code"], {"tt": test_type, "code": item_code}
-        sql = _RESULTS_CTE + "SELECT * FROM ruled WHERE " + " AND ".join(clauses)
+        sql = _COMMON_CTE + "SELECT * FROM ruled WHERE " + " AND ".join(clauses)
         rows = [_row_to_korean(r) for r in dbx.query(sql, sql_params)]
         return _rows_to_csv(rows, _FULL_FIELDS)
     # 품목 목록만 필요(oot_products) — 전체 조인 없이 가벼운 DISTINCT 조회.
@@ -341,7 +355,7 @@ def fetch_oot_rows_for_types(test_types: list[str]) -> list[dict]:
         return []
     params = {f"tt{i}": t for i, t in enumerate(test_types)}
     placeholders = ", ".join(f":{k}" for k in params)
-    sql = _RESULTS_CTE + f"""
+    sql = _OOT_CTE + f"""
 , scored AS (
   SELECT *,
     avg(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, GROUP_NM, TESTITEM_NM) AS MEAN_VALUE,
@@ -731,7 +745,7 @@ def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str]
     반환: {code, name, lots:[{lot, year, normal, warn, crit, qual, flagged,
             items:[{name, val, mean, sd, z, status}]}], years:[...]}
     """
-    pdf = _product_df(code, test_type)
+    pdf = apply_d4(_product_df(code, test_type), test_type)
     if pdf.empty or "제조번호" not in pdf.columns:
         return {"code": code, "name": "", "lots": [], "years": ["전체"]}
     kept, dropped = split_excluded(pdf)                # 정성 개수에 섞이지 않게 먼저 떼어 낸다
@@ -743,6 +757,30 @@ def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str]
     return {"code": code, "name": info["name"], "lots": lots,
             "years": ["전체"] + info["years"], "sampleInfo": info["sample_info"],
             "excluded": excluded, "ruleNote": RULE_NOTE}
+
+
+def apply_d4(pdf: pd.DataFrame, test_type: str) -> pd.DataFrame:
+    """D-4 잠정(재시험 원값)을 화면·엑셀 줄에 적용한다 — _OOT_CTE 의 ruled1·ruled 와 같은 규칙.
+
+    같은 품목코드·시험종류·제조번호·대분류·시험항목(안정성은 같은 의뢰번호까지) 안에 적부가 N/A('A')가
+    아닌 규칙 적용 값이 있으면, 적부 N/A 이고 규칙 적용 값이 있는 줄은 값을 비우고 까닭을
+    '재시험 원값(잠정)' 으로 적는다. 제조번호가 빈 줄과 홀로 있는 N/A 줄은 그대로 둔다.
+    공통 조회문(_COMMON_CTE)에 창 함수를 넣지 않으려고 여기서 낸다. 결과는 줄 순서와 무관하다.
+    _product_df 는 품목코드 하나·시험종류 하나 줄이라 시험종류는 인자로 받는다.
+    """
+    if pdf.empty or "규칙적용값" not in pdf.columns:
+        return pdf
+    pdf = pdf.copy()
+    has = pdf["규칙적용값"].astype(str).str.strip() != ""
+    na = pdf["적부"].astype(str) == "A"
+    lot = pdf["제조번호"].astype(str)
+    req = pdf["의뢰번호"].astype(str) if "안정성" in str(test_type) else pd.Series("", index=pdf.index)
+    keys = [pdf["품목코드"].astype(str), lot, pdf["대분류"].astype(str), pdf["시험항목"].astype(str), req]
+    other = (has & ~na).astype(int).groupby(keys).transform("max") == 1
+    hit = other & has & na & (lot.str.strip() != "")
+    pdf.loc[hit, "규칙적용값"] = ""
+    pdf.loc[hit, "뺀까닭"] = "재시험 원값(잠정)"
+    return pdf
 
 
 def split_excluded(pdf: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -947,7 +985,7 @@ def oot_excel(code: str, test_type: str = "완제품", year: Optional[str] = Non
     import io as _io
     from openpyxl import Workbook
     import oot_excel_report
-    pdf = _product_df(code, test_type)
+    pdf = apply_d4(_product_df(code, test_type), test_type)
     if pdf.empty or "제조번호" not in pdf.columns:
         raise ValueError("데이터가 없습니다.")
     name = str(pdf.get("품목", pd.Series([""])).iloc[0]) if "품목" in pdf else ""

@@ -65,8 +65,10 @@ _COLS = ("ITEM_CD, ITEM_NM, LOT_NO, BIZPROCESS_NM, TESTITEM_NM, GROUP_NM, STANDA
          "RESULT_NUMBER_RAW, REQUEST_NO, REQUEST_ID, ORDER_ID, TESTITEM_ID, ORDER_SEQ, TESTITEM_SEQ, "
          "RESULT_YN, RETEST_ITEM_YN, BIZPROCESS_CD, RULE_VALUE, EXCLUDED_REASON")
 _WHERE = "BIZPROCESS_NM = :tt AND ITEM_CD IS NOT NULL"
-COUNT_SQL = core._RESULTS_CTE + f"SELECT count(*) AS N FROM ruled WHERE {_WHERE}"
-ROWS_SQL = core._RESULTS_CTE + f"SELECT {_COLS} FROM ruled WHERE {_WHERE}"
+# D-4 잠정은 이 조회문(_OOT_CTE)이 낸다. 화면·엑셀은 공통 조회문에 창 함수를 넣지 않고 kdp_core.apply_d4 로
+# 같은 규칙을 낸다 — 시험(넘김 줄 상태 = 화면 상태)이 둘을 견준다.
+COUNT_SQL = core._OOT_CTE + f"SELECT count(*) AS N FROM ruled WHERE {_WHERE}"
+ROWS_SQL = core._OOT_CTE + f"SELECT {_COLS} FROM ruled WHERE {_WHERE}"
 LINE_FIELDS = (
     "item_cd", "item_nm", "test_type_cd", "test_type", "lot_no", "lot_blank", "lot_date",
     "request_date", "request_no", "request_id", "order_id", "testitem_id", "order_seq",
