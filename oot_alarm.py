@@ -248,6 +248,12 @@ def main():
     ap.add_argument("--reset-state", action="store_true", help="발송 이력 초기화")
     a = ap.parse_args()
 
+    # 끄는 스위치 — 스테이징은 운영과 보관함(발송 기록·설정)을 같이 써서, 알람이 두 곳에서 돌면 같은 건을
+    # 두 번 보내거나 기록을 서로 덮을 수 있다. 스테이징에만 OOT_ALARM_OFF=1 을 둔다(axhub env set-staging-value).
+    if os.getenv("OOT_ALARM_OFF", "").strip() == "1":
+        _log("OOT 자동 알람 끔 — 끄는 스위치 OOT_ALARM_OFF=1")
+        return
+
     if a.reset_state:
         storage_io.remove(STATE_PATH)
         _log("발송 이력 초기화 완료 (다음 실행이 새 기준선)")

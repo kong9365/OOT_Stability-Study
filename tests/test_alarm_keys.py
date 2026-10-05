@@ -119,3 +119,29 @@ def test_new_send_is_recorded_in_old_form_too(alarm):
     alarm["run"](alarm["new"], [A, B, C])                        # 옮김만
     assert alarm["run"](alarm["new"], [A, B, C, D]) == [("23001", "용출", "성분가")]
     assert alarm["run"](alarm["old"], [A, B, C, D]) == []        # 새 코드가 보낸 건은 옛 코드도 본 것으로
+
+def test_off_switch_stops_before_any_check(monkeypatch):
+    """OOT_ALARM_OFF=1 이면 점검·대기 없이 바로 끝난다(스테이징에서 알람이 두 곳에서 돌지 않게)."""
+    import sys
+    import oot_alarm
+    monkeypatch.setenv("OOT_ALARM_OFF", "1")
+    monkeypatch.setattr(sys, "argv", ["oot_alarm.py"])
+    logs = []
+    monkeypatch.setattr(oot_alarm, "_log", logs.append)
+    monkeypatch.setattr(oot_alarm, "check_once", lambda: (_ for _ in ()).throw(AssertionError("점검이 돌았다")))
+    monkeypatch.setattr(oot_alarm.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("대기했다")))
+    assert oot_alarm.main() is None
+    assert logs == ["OOT 자동 알람 끔 — 끄는 스위치 OOT_ALARM_OFF=1"]
+
+
+def test_off_switch_needs_exactly_one(monkeypatch):
+    """'1' 이 아니면(빈 값 · 0) 종전대로 돈다 — 운영에는 이 값을 두지 않는다."""
+    import sys
+    import oot_alarm
+    for v in ("", "0"):
+        monkeypatch.setenv("OOT_ALARM_OFF", v)
+        monkeypatch.setattr(sys, "argv", ["oot_alarm.py", "--once"])
+        ran = []
+        monkeypatch.setattr(oot_alarm, "check_once", lambda: ran.append(1))
+        oot_alarm.main()
+        assert ran == [1], v
