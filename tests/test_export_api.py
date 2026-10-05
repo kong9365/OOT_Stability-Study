@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""넘김 주소 셋(열쇠 503/401/200 · 판 id 검사 · 화면 파일 연결보다 앞) · 새로고침 10분 제한."""
+"""넘김 주소 셋(열쇠 503/401/200 · 판 id 검사 · 화면 파일 연결보다 앞) · 일정 흐름 켜는 조건 · 새로고침 10분 제한."""
 from __future__ import annotations
 
 import pytest
@@ -68,6 +68,41 @@ def test_run_reports_state(api, monkeypatch):
     assert r.status_code == 200 and r.json() == {"state": "running"}
 
 
+@pytest.mark.parametrize("mode, off, key, on", [
+    ("s3", None, None, True),            # axhub 에 올라간 앱 — 열쇠 없이 켬
+    ("s3", "1", KEY, False),             # 끄는 스위치가 무엇보다 앞
+    ("disk", None, KEY, True),           # 종전 동작(디스크 모드 개발용)
+    ("disk", None, None, False),         # 디스크 · 열쇠 없음
+    ("s3-broken", None, None, False),    # S3 설정은 있으나 연결 준비 실패
+])
+def test_startup_schedule_conditions(monkeypatch, capsys, mode, off, key, on):
+    import types
+    import dashboard_api
+    import oot_export
+    import storage_io
+    started = []
+
+    class FakeThread:                    # 실제 스레드는 띄우지 않는다
+        def __init__(self, target, daemon):
+            self.target, self.daemon = target, daemon
+
+        def start(self):
+            started.append((self.target, self.daemon))
+
+    monkeypatch.setattr(dashboard_api, "threading", types.SimpleNamespace(Thread=FakeThread))
+    monkeypatch.setattr(storage_io, "export_mode", lambda: mode)
+    for name, val in (("OOT_EXPORT_OFF", off), ("OOT_EXPORT_KEY", key)):
+        if val is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, val)
+    dashboard_api._startup_export_schedule()
+    assert started == ([(oot_export.scheduler_loop, True)] if on else [])
+    out = capsys.readouterr().out
+    assert out.startswith(f"넘김 파일 일정: {'켬' if on else '끔'} — ") and out.count("\n") == 1
+    assert KEY not in out
+
+
 def test_export_routes_before_static_mount(api):
     from starlette.routing import Mount
     _, dashboard_api, _ = api
@@ -98,6 +133,7 @@ def test_axhub_manifest_declares_dedicated_key():
     with open(os.path.join(root, "axhub.yaml"), encoding="utf-8") as f:
         text = f.read()
     assert "- name: OOT_EXPORT_KEY" in text.split("optional:")[1]
+    assert "- name: OOT_EXPORT_OFF" in text.split("optional:")[1]
     with open(os.path.join(root, ".dockerignore"), encoding="utf-8") as f:
         ignored = {ln.strip() for ln in f if ln.strip() and not ln.startswith("#")}
     assert {".env", "recipients_db.json", "oot_alert_config.json", ".oot_alarm_state.json",

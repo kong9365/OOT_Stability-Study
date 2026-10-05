@@ -624,8 +624,22 @@ def _startup_prewarm():
 
 @app.on_event("startup")
 def _startup_export_schedule():
-    """넘김 파일 일정 흐름(03:45 KST 이후 하루 한 번) — 열쇠(OOT_EXPORT_KEY)가 있을 때만 띄운다."""
-    if os.environ.get("OOT_EXPORT_KEY"):
+    """넘김 파일 일정 흐름(03:45 KST 이후 하루 한 번).
+    보관함이 S3(axhub 에 올라간 앱)이거나 열쇠(OOT_EXPORT_KEY, 디스크 모드 개발용)가 있으면 띄운다.
+    끄는 스위치 OOT_EXPORT_OFF=1 이면 어느 경우든 띄우지 않는다."""
+    mode = storage_io.export_mode()
+    if os.environ.get("OOT_EXPORT_OFF") == "1":
+        on, why = False, "끄는 스위치(OOT_EXPORT_OFF=1)가 켜져 있음"
+    elif mode == "s3":
+        on, why = True, "보관함(S3)에 연결됨"
+    elif os.environ.get("OOT_EXPORT_KEY"):
+        on, why = True, "열쇠가 있음(디스크 모드 개발용)"
+    elif mode == "s3-broken":
+        on, why = False, "보관함(S3) 설정은 있으나 연결 준비에 실패함"
+    else:
+        on, why = False, "보관함이 S3 가 아니고 열쇠도 없음"
+    print(f"넘김 파일 일정: {'켬' if on else '끔'} — {why}", flush=True)
+    if on:
         threading.Thread(target=oot_export.scheduler_loop, daemon=True).start()
 
 
