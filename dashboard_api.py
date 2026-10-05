@@ -631,9 +631,10 @@ def _startup_export_schedule():
     if os.environ.get("OOT_EXPORT_OFF") == "1":
         on, why = False, "끄는 스위치(OOT_EXPORT_OFF=1)가 켜져 있음"
     elif mode == "s3":
-        on, why = True, "보관함(S3)에 연결됨"
+        on, why = True, "보관함(S3) 설정됨"
     elif os.environ.get("OOT_EXPORT_KEY"):
-        on, why = True, "열쇠가 있음(디스크 모드 개발용)"
+        on, why = True, ("열쇠가 있음(보관함 S3 준비 실패 — 일정 점검이 실패할 수 있음)" if mode == "s3-broken"
+                         else "열쇠가 있음(디스크 모드 개발용)")
     elif mode == "s3-broken":
         on, why = False, "보관함(S3) 설정은 있으나 연결 준비에 실패함"
     else:
