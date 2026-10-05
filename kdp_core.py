@@ -636,7 +636,8 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
         # 작아지면 1단위 차이가 3σ로 과대 판정됨. 분해능 R(서로 다른 값 간 최소 간격)을 σ 하한으로
         # 적용 → 1단위 차이 ≈ 1σ. 연속(잘 분해된) 데이터는 R이 작아 자동 무효(완제품 등 영향 없음).
         for (gr, it), grp in pdf.groupby(["대분류", "시험항목"]):
-            vals = grp.loc[grp["_sd_t"] > 0, "_v"].dropna().tolist()
+            # 값 순서로 더한다 — 조회 줄 순서가 실행마다 달라도(병렬 조회) 평균·σ 끝자리가 같게(같은 자료 = 같은 판)
+            vals = sorted(grp.loc[grp["_sd_t"] > 0, "_v"].dropna().tolist())
             n = len(vals)
             mu = float(np.mean(vals)) if n >= 2 else float("nan")
             sd_raw = float(np.std(vals, ddof=1)) if n >= 2 else float("nan")

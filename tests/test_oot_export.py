@@ -97,6 +97,30 @@ def test_hash_and_deterministic():
     assert meta["gz_sha256"] == hashlib.sha256(gz).hexdigest()
 
 
+def test_same_rows_in_any_order_give_same_version():
+    """조회 줄 순서가 실행마다 달라도(Databricks·DuckDB 병렬 조회) 같은 자료면 같은 판 — 평균·σ 끝자리까지.
+    실측 2026-10-05: 같은 오프라인 사본을 두 번 돌려 판 id 가 갈렸고(평균·σ·z 끝자리 8,913줄), 생지황즙 증발잔류물
+    두 줄은 z 가 -2.0 ↔ -2.0000000000000355 로 갈려 앱 화면 상태가 정상 ↔ 주의 로 바뀌었다."""
+    import random
+    import numpy as np
+    vals = [99.38, 100.1, 98.7, 101.3, 99.9, 100.7, 98.95, 100.45, 99.15, 101.05]
+    sums = set()
+    for seed in range(50):                       # 이 시험의 전제 — 이 값들은 더하는 순서마다 평균 끝자리가 갈린다
+        v = list(vals)
+        random.Random(seed).shuffle(v)
+        sums.add(float(np.mean(v)))
+    assert len(sums) > 1
+    b = F._Builder()
+    for i, v in enumerate(vals):
+        b.add(code=F.P1, tt=F.TT_FIN, lot=f"23{i + 1:03d}", group="함량", item="순서 시험",
+              std="표시량의 95.0 ~ 105.0%", num=str(v), **F._dates(i))
+    base = build(b.rows)[0]
+    for seed in range(5):
+        shuffled = list(b.rows)
+        random.Random(seed).shuffle(shuffled)
+        assert build(shuffled)[0] == base, seed
+
+
 def test_counts_and_meta():
     import oot_export
     rows = F.rule_rows()
