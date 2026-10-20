@@ -125,6 +125,13 @@ def test_lot_status_end_progress_delay_stop():
     assert st["D"]["status"] == "중지"
 
 
+def test_unrequested_zero_month_not_counted_and_no_next_when_ended():
+    rows = _sched(1, "A", [("제조시", "2024-01-01", "READY", None), ("3개월", "2024-04-01", "REQUEST", 2),
+                           ("6개월", "2024-07-01", "REQUEST", 3)])
+    a = SS.lot_schedule(rows, TODAY)["A"]
+    assert a["status"] == "종료" and a["done"] == 2 and a["total"] == 2 and a["next"] is None
+
+
 def test_lot_with_two_plans_uses_longer_plan():
     rows = _sched(1, "A", [("제조시", "2024-01-01", "REQUEST", 1)]) + \
         _sched(2, "A", [("제조시", "2024-01-01", "REQUEST", 2), ("3개월", "2024-04-01", "READY", None)])

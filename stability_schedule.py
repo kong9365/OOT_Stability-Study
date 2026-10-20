@@ -99,7 +99,11 @@ def lot_schedule(rows: Optional[list], today: Optional[_dt.date] = None) -> dict
         def _key(r):
             m = period_months(r.get("SCHEDULE_PERIOD"), r.get("SCHEDULE_NUM"))
             return (m if m is not None else 1e9, str(r.get("SCHEDULE_DATE") or ""))
-        pts = sorted(pts, key=_key)
+        # 0개월(제조시)은 출하 완제품 시험으로 갈음해 일정표에 의뢰가 안 걸린 경우가 많다 — 미의뢰여도 세지 않는다.
+        pts = sorted((r for r in pts if str(r.get("SCHEDULE_STATUS") or "") == "REQUEST"
+                      or period_months(r.get("SCHEDULE_PERIOD"), r.get("SCHEDULE_NUM")) != 0.0), key=_key)
+        if not pts:
+            continue
         done = [r for r in pts if str(r.get("SCHEDULE_STATUS") or "") == "REQUEST"]
         left = [r for r in pts if str(r.get("SCHEDULE_STATUS") or "") != "REQUEST"]
         last = pts[-1]
@@ -114,6 +118,7 @@ def lot_schedule(rows: Optional[list], today: Optional[_dt.date] = None) -> dict
             status = "중지"
         elif str(last.get("SCHEDULE_STATUS") or "") == "REQUEST":
             status = "종료"
+            nxt = None   # 마지막 시점이 의뢰됐으면 '다음'은 의미 없다(중간에 건너뛴 시점 포함)
         elif nxt and nxt["date"] and nxt["date"] < today.isoformat():
             status = "지연"
         else:
