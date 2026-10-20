@@ -39,9 +39,13 @@ def fake_dbx(monkeypatch):
     import oot_fake_rows
 
     monkeypatch.setattr(kdp_core, "_save_cache_disk", lambda: None)
+    # 안정성 일정표 조회는 기본으로 '없음' — 일정표가 필요한 시험은 이 함수를 따로 바꾼다.
+    monkeypatch.setattr(kdp_core, "_fetch_stability_schedule", lambda code, tt: None)
+    kdp_core._SCHED_CACHE.clear()
 
     def _install(rows):
         kdp_core._DATA_CACHE.clear()
+        kdp_core._SCHED_CACHE.clear()
         monkeypatch.setattr(dbx, "query", oot_fake_rows.fake_query(rows))
 
     yield _install

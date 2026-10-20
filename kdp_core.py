@@ -132,8 +132,14 @@ def clear_data_cache() -> int:
 #    a4ef25c 와 실행 모양이 같다(창 함수는 중복 지우기 하나뿐). ④ 의 창 함수를 여기에 넣으면
 #    Databricks 가 돌려주는 줄 순서가 바뀌고, 첫 줄을 골라 쓰는 안정성·APQR 응답이 바뀐다(M1).
 #    화면·엑셀의 ④ 는 apply_d4 가 pandas 로 같은 규칙을 낸다.
-#  - _OOT_CTE: 알람(fetch_oot_rows_for_types)·넘김(oot_export) 전용. 각자 따로 묻는 조회문이라 ④ 까지 낸다.
+#  - _OOT_CTE: 넘김(oot_export) 전용(알람은 승인 전 결과도 보는 _OOT_CTE_ALARM). 각자 따로 묻는 조회문이라 ④ 까지 낸다.
 # 정규식·백슬래시 없이 LIKE·replace·try_cast 만 써서 Databricks 와 오프라인(DuckDB)에서 같은 글로 돈다.
+#
+# 모집단(2026-10-21 결정): 정식 결과 = 지시 상태 승인(ORDER_STATUS='90')인 것만. 미승인(작성·검토 중,
+# 약 188행)은 아직 확정 전이라 뺀다. 재시험 원값 제외(④ D-4)는 그대로 둔다. 되돌리려면 환경변수
+# OOT_APPROVED_ONLY=0 (코드 수정·재배포 없이 재시작만).
+_APPROVED_ONLY = os.getenv("OOT_APPROVED_ONLY", "1").strip() not in ("0", "false", "False", "")
+_APPROVED_SQL = "AND tor.ORDER_STATUS = '90'" if _APPROVED_ONLY else ""
 _RESULTS_CTE = f"""
 WITH results AS (
   SELECT
@@ -157,7 +163,7 @@ WITH results AS (
     ON cii.PLANT_CD=trr.PLANT_CD AND cii.ITEM_CD=trr.ITEM_CD
   LEFT JOIN `{LIMS_CATALOG}`.bronze.lims_dbo_qm_bizprocess_master qbm
     ON qbm.PLANT_CD=trr.PLANT_CD AND qbm.BIZPROCESS_CD=trr.BIZPROCESS_CD
-  WHERE trr.PLANT_CD='{PLANT_CD}' AND ttr.TESTITEM_ID IS NOT NULL
+  WHERE trr.PLANT_CD='{PLANT_CD}' AND ttr.TESTITEM_ID IS NOT NULL {_APPROVED_SQL}
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY trr.PLANT_CD,trr.REQUEST_ID,tor.ORDER_ID,ttr.TESTITEM_ID
     ORDER BY ttr.UPDATE_TIME DESC, tor.UPDATE_TIME DESC
@@ -205,6 +211,11 @@ ruled AS (
   FROM ruled1
 )
 """
+
+# 알람 전용: 승인 전 결과도 대상이다(2026-10-21 결정). 입력은 됐지만 아직 승인 안 된 이탈 값을 승인을
+# 기다리지 않고 바로 알리려는 것 — 승인 필터만 빼고 나머지(규칙 ①~④)는 _OOT_CTE 와 같다.
+_RESULTS_CTE_ALL = _RESULTS_CTE.replace(_APPROVED_SQL, "") if _APPROVED_SQL else _RESULTS_CTE
+_OOT_CTE_ALARM = _RESULTS_CTE_ALL + _OOT_CTE[len(_RESULTS_CTE):]
 
 # 조회문 규칙이 계산에서 뺀 줄의 까닭(서식 결과는 값이 원래 비어 있어 따로 떼지 않는다).
 OOT_EXCLUDE_REASONS = ("거짓 0", "재시험 원값(잠정)")
@@ -301,7 +312,7 @@ ORDER BY ITEM_CD
 def _view_csv(params: dict) -> str:
     """조회 결과 CSV — 인메모리 TTL 캐시. 같은 params 재조회는 즉시(네트워크 생략)."""
     # 'v2': 규칙 칸이 없는 예전 디스크 임시 저장분을 읽지 않게 하는 판 표시.
-    key = "v2|" + "|".join(f"{k}={v}" for k, v in sorted(params.items()))
+    key = "v3|" + "|".join(f"{k}={v}" for k, v in sorted(params.items()))
     now = time.time()
     with _LOCK:
         hit = _DATA_CACHE.get(key)
@@ -355,7 +366,7 @@ def fetch_oot_rows_for_types(test_types: list[str]) -> list[dict]:
         return []
     params = {f"tt{i}": t for i, t in enumerate(test_types)}
     placeholders = ", ".join(f":{k}" for k in params)
-    sql = _OOT_CTE + f"""
+    sql = _OOT_CTE_ALARM + f"""
 , scored AS (
   SELECT *,
     avg(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, GROUP_NM, TESTITEM_NM) AS MEAN_VALUE,
@@ -433,23 +444,41 @@ _QUAL_KW = ("불검출", "성상", "현탁액", "반점", "Rf", "S/N", "일치",
 _UNIT = r"(?:mg|㎎|ng|㎍|μg|㎍|ug|pg|kg|g|%|ppm|ppb|IU|CFU)"
 
 
+_RE_THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")          # 5,000 → 5000
+_RE_NUM_UNIT = re.compile(r"(\d+\.?\d*)\s*" + _UNIT)
+_RE_DIR = re.compile(r"\s*(?:\([^)]*\)\s*)?(이하|미만|이내|이상|초과)")   # 숫자·단위 바로 뒤의 방향 말
+
+
 def parse_criterion(text):
-    """시험기준 텍스트 → (규격하한, 규격상한). stability_page.parse_criterion 과 동일 규칙."""
+    """시험기준 텍스트 → (규격하한, 규격상한). stability_page.parse_criterion 과 같은 규칙에 더해
+    - 천 단위 쉼표를 뺀다("5,000 ppm 이하" → 상한 5000, 예전엔 000 → 0).
+    - 숫자가 여럿이면 '이상/이하' 말이 바로 뒤따르는 마지막 것을 쓴다
+      ("30 % 에탄올 … 10.0 % 이상" → 하한 10.0, "Q + 10 % 이상 (85 % 이상)" → 하한 85).
+      그런 숫자가 없으면 예전처럼 첫 숫자.
+    """
     if text is None or (isinstance(text, float) and np.isnan(text)):
         return (None, None)
     s = str(text).strip()
     if not s or any(k in s for k in _QUAL_KW):
         return (None, None)
+    s = _RE_THOUSANDS.sub("", s)
     m = re.search(r"(\d+\.?\d*)\s*[∼~〜–—\-]\s*(\d+\.?\d*)", s)
     if m:
         return (float(m.group(1)), float(m.group(2)))
-    m = re.search(r"(\d+\.?\d*)\s*" + _UNIT, s)
-    if not m:
+    cands = list(_RE_NUM_UNIT.finditer(s))
+    if not cands:
         return (None, None)
-    val = float(m.group(1))
-    if "이하" in s or "미만" in s or "이내" in s:   # '이내'도 상한(붕해 등)
+    sel, word = cands[0], None
+    for c in cands:
+        d = _RE_DIR.match(s, c.end())
+        if d:
+            sel, word = c, d.group(1)
+    val = float(sel.group(1))
+    if word is None:
+        word = next((w for w in ("이하", "미만", "이내", "이상", "초과") if w in s), None)
+    if word in ("이하", "미만", "이내"):   # '이내'도 상한(붕해 등)
         return (None, val)
-    if "이상" in s or "초과" in s:
+    if word in ("이상", "초과"):
         return (val, None)
     return (None, None)
 
@@ -1091,10 +1120,37 @@ def group_excel(codes: list[str], test_type: str = "완제품",
     return buf.getvalue()
 
 
+# ── 안정성 일정표 조회(순수 판정은 stability_schedule.py) ──────────────────────
+_SCHED_TTL = float(os.getenv("KDP_SCHEDULE_TTL_SEC", "600"))
+_SCHED_CACHE: dict[tuple, tuple[float, Optional[list]]] = {}
+
+
+def _fetch_stability_schedule(code: str, test_type: str) -> Optional[list]:
+    """안정성 계획 일정. 실패하면 None(권한·표 이름 문제가 화면을 막지 않게 — 비고만으로 계속)."""
+    import stability_schedule as _ss
+    try:
+        return list(dbx.query(_ss.query_sql(LIMS_CATALOG, PLANT_CD), {"code": code, "tt": test_type}))
+    except Exception:
+        return None
+
+
+def _stability_schedule(code: str, test_type: str) -> Optional[list]:
+    key = (code, test_type)
+    now = time.time()
+    with _LOCK:
+        hit = _SCHED_CACHE.get(key)
+        if hit and now - hit[0] < _SCHED_TTL:
+            return hit[1]
+    rows = _fetch_stability_schedule(code, test_type)
+    with _LOCK:
+        _SCHED_CACHE[key] = (time.time(), rows)
+    return rows
+
+
 # ── 안정성 ────────────────────────────────────────────────────────────────────
 def stability_df(code: str, test_type: str) -> pd.DataFrame:
     """OOT_추출용 → 안정성 long format(제조번호·시험항목·대분류·시점(개월)·결과값·규격)."""
-    from lims_parser import parse_month
+    from lims_parser import classify_month
     is_stab = "안정성" in test_type
     # 시험종류 데이터 + (안정성이면) 완제품 0개월 baseline 을 병렬 조회 → 콜드 로딩 절반.
     rel = None
@@ -1112,11 +1168,35 @@ def stability_df(code: str, test_type: str) -> pd.DataFrame:
     if raw.empty:
         return pd.DataFrame()
     rec = []
+    unmatched: dict = {}   # 시점을 못 읽어 빠진 줄(정량 결과는 있음) — 조용히 버리지 않고 알린다
+    converted: dict = {}   # '기간 : N일'·'제조시'·일정표로 보완해 쓴 줄
+    conflicts: dict = {}   # 비고의 개월과 일정표가 다른 줄(일정표를 쓴다)
+    import stability_schedule as _ss
+    sched_rows = _stability_schedule(code, test_type) if is_stab else None
+    sched_m = _ss.schedule_months(sched_rows)
     for _, row in raw.iterrows():
-        month = parse_month(row.get("의뢰 특이사항", ""), test_type)
+        remark = str(row.get("의뢰 특이사항", "") or "").strip()
+        month, kind = classify_month(remark, test_type)
         val = _num(row.get("LOT결과_0제외", ""))
-        if month is None or np.isnan(val):
+        if np.isnan(val):
             continue
+        sch = sched_m.get(_ss.rid(row.get("REQUEST_ID"))) if sched_m else None
+        if sch is not None:
+            if month is not None and month != sch[0]:
+                c = conflicts.setdefault(remark, {"schedule": sch[1], "months": sch[0], "rows": 0})
+                c["rows"] += 1
+            elif month is None:
+                c = converted.setdefault(remark or "(특이사항 비어 있음)",
+                                         {"months": sch[0], "rows": 0, "by": "일정표"})
+                c["rows"] += 1
+            month, kind = sch[0], "일정표"
+        if month is None:
+            k = remark or "(특이사항 비어 있음)"
+            unmatched[k] = unmatched.get(k, 0) + 1
+            continue
+        if kind in ("일", "제조시"):
+            c = converted.setdefault(remark, {"months": month, "rows": 0})
+            c["rows"] += 1
         crit = row.get("시험기준", "")
         lo, hi = parse_criterion(crit)
         rec.append({"제조번호": str(row.get("제조번호", "")).strip(),
@@ -1154,7 +1234,38 @@ def stability_df(code: str, test_type: str) -> pd.DataFrame:
                             "제조일자": str(row.get("제조일자", "")).strip(),
                             "유효기한": str(row.get("유효기한", "")).strip()})
                 have0.add(key)
-    return pd.DataFrame(rec)
+    out = pd.DataFrame(rec)
+    if unmatched:
+        out.attrs["unmatchedRemarks"] = unmatched
+    if converted:
+        out.attrs["convertedRemarks"] = converted
+    if conflicts:
+        out.attrs["monthConflicts"] = conflicts
+    if sched_rows:
+        out.attrs["lotSchedule"] = _ss.lot_schedule(sched_rows)
+    return out
+
+
+def _month_notes(df: pd.DataFrame) -> dict:
+    """stability_df 가 붙인 '못 읽은/환산한 특이사항' 을 응답용으로 — 없으면 빈 dict(응답 꼴 불변)."""
+    notes: dict = {}
+    um = df.attrs.get("unmatchedRemarks") or {}
+    if um:
+        notes["unmatchedRemarks"] = [{"remark": k, "rows": int(v)}
+                                     for k, v in sorted(um.items(), key=lambda kv: -kv[1])]
+        notes["unmatchedRows"] = int(sum(um.values()))
+    cv = df.attrs.get("convertedRemarks") or {}
+    if cv:
+        notes["convertedRemarks"] = [{"remark": k, "months": float(v["months"]), "rows": int(v["rows"]),
+                                      **({"by": v["by"]} if v.get("by") else {})}
+                                     for k, v in sorted(cv.items())]
+    cf = df.attrs.get("monthConflicts") or {}
+    if cf:
+        notes["monthConflicts"] = [{"remark": k, "schedule": v["schedule"], "months": float(v["months"]),
+                                    "rows": int(v["rows"])} for k, v in sorted(cf.items())]
+    if df.attrs.get("lotSchedule"):
+        notes["lotSchedule"] = df.attrs["lotSchedule"]
+    return notes
 
 
 def _ancova(d: pd.DataFrame) -> Optional[dict]:
@@ -1263,6 +1374,51 @@ def _steps_json(steps: dict) -> list:
     return out
 
 
+def _oos_points(batches: list, sl, sh) -> list:
+    """측정 시점별 규격 이탈(OOS) — 회귀 잔차(시점간 OOT)와 별개로, 값이 규격 밖이면 모두 낸다."""
+    out = []
+    for b in batches:
+        for x, y in b["pts"]:
+            if sl is not None and y < sl:
+                out.append({"batch": b["batch"], "time": round(float(x), 1), "value": round(float(y), 2),
+                            "side": "하한 미달", "limit": sl})
+            elif sh is not None and y > sh:
+                out.append({"batch": b["batch"], "time": round(float(x), 1), "value": round(float(y), 2),
+                            "side": "상한 초과", "limit": sh})
+    return out
+
+
+SIG_CHANGE_PCT = 5.0   # ICH Q1A(R2): 함량의 초기값 대비 5% 변화
+
+
+def _significant_change(batches: list, sl, sh, assay: bool) -> list:
+    """가속시험 유의적 변화(ICH Q1A) — 배치별로 ① 초기값 대비 5% 이상 변화(함량만) ② 규격 이탈.
+
+    초기값 = 가장 이른 시점의 값. 변화율은 초기값 대비 상대값(%)이고 가장 크게 변한 시점을 낸다.
+    """
+    out = []
+    for b in batches:
+        pts = sorted(b["pts"], key=lambda p: p[0])
+        if len(pts) < 2:
+            continue
+        x0, y0 = pts[0]
+        worst = None
+        if assay and y0:
+            for x, y in pts[1:]:
+                ch = (y - y0) / abs(y0) * 100.0
+                if worst is None or abs(ch) > abs(worst[1]):
+                    worst = (x, ch, y)
+        oos = [p for p in pts if (sl is not None and p[1] < sl) or (sh is not None and p[1] > sh)]
+        over5 = bool(worst and abs(worst[1]) >= SIG_CHANGE_PCT)
+        if not (over5 or oos):
+            continue
+        out.append({"batch": b["batch"], "initialTime": round(float(x0), 1), "initial": round(float(y0), 2),
+                    "changePct": None if worst is None else round(float(worst[1]), 1),
+                    "changeTime": None if worst is None else round(float(worst[0]), 1),
+                    "overLimit": over5, "oosCount": len(oos)})
+    return out
+
+
 def stability_analysis(code: str, test_type: str, spec_low: float = 90.0,
                        spec_high: float = 150.0, method: str = "pooled",
                        test_item: Optional[str] = None, batch: Optional[str] = None) -> dict:
@@ -1271,12 +1427,13 @@ def stability_analysis(code: str, test_type: str, spec_low: float = 90.0,
     batch 지정 시 해당 제조번호(LOT) 한 배치만 분석한다(OOT 교차연동용).
     """
     df = stability_df(code, test_type)
+    notes = _month_notes(df)
     if df.empty:
-        return {"ok": False, "reason": "정량 시점 데이터 없음"}
+        return {"ok": False, "reason": "정량 시점 데이터 없음", **notes}
     if batch:
         df = df[df["제조번호"].astype(str) == str(batch)]
         if df.empty:
-            return {"ok": False, "reason": f"배치 {batch}의 정량 시점 데이터가 없습니다."}
+            return {"ok": False, "reason": f"배치 {batch}의 정량 시점 데이터가 없습니다.", **notes}
 
     items = sorted(df["시험항목"].unique())
     item = test_item if test_item in items else _pick_test_item(df)
@@ -1355,11 +1512,24 @@ def stability_analysis(code: str, test_type: str, spec_low: float = 90.0,
                 n_oot += 1
             elif ad > 2:
                 n_warn += 1
-            tp_rows.append({"time": round(float(x), 0), "meas": round(float(y), 2),
+            tp_rows.append({"time": round(float(x), 1), "meas": round(float(y), 2),
                             "pred": round(float(pred), 2), "dev": round(float(dev), 2),
                             "judge": judge})
 
     ancova = _ancova(d)
+    spec_assumed = bool(both_na.any())     # 규격 문구를 못 읽어 기본값(수동 입력)을 쓴 시험항목
+    extra: dict = {}
+    if spec_assumed:
+        extra["specAssumed"] = True        # 이때 규격 이탈·유의적 변화는 판정하지 않는다(기본값은 근거 없음)
+    elif "안정성" in test_type:             # 출하시험(완제품) 분석 화면에는 안정성 규격 이탈 칸을 만들지 않는다
+        oos = _oos_points(batches, sl, sh)
+        if oos:
+            extra["oos"] = oos
+        if accelerated:
+            assay = bool(d["대분류"].astype(str).str.contains("함량").any()) if "대분류" in d.columns else False
+            sig = _significant_change(batches, sl, sh, assay)
+            if sig:
+                extra["sigChange"] = sig
     pair_count = int(sum(len(b["pts"]) for b in batches))
     # 허가 유효기간 대표값(최빈값) + 추정 저장수명이 허가보다 짧은지 플래그
     av = [v for v in approved.values() if v]
@@ -1382,6 +1552,7 @@ def stability_analysis(code: str, test_type: str, spec_low: float = 90.0,
         "sigmaBase": "통합 잔차오차" if method == "pooled" else "배치 잔차오차",
         "tpBatch": tb_name, "tpRows": tp_rows, "nOot": n_oot, "nWarn": n_warn,
         "ancova": ancova,
+        **extra, **notes,
     }
 
 
@@ -1392,8 +1563,9 @@ def stability_tables(code: str, test_type: str, spec_low: float = 90.0,
     batch 지정 시 해당 배치만.
     """
     df = stability_df(code, test_type)
+    notes = _month_notes(df)
     if df.empty:
-        return {"ok": False, "reason": "데이터 없음"}
+        return {"ok": False, "reason": "데이터 없음", **notes}
     df = df.copy()
     if batch:
         df = df[df["제조번호"].astype(str) == str(batch)]
@@ -1446,7 +1618,7 @@ def stability_tables(code: str, test_type: str, spec_low: float = 90.0,
     return {"ok": True, "summaryPooled": summary_pooled, "summaryIndep": summary_indep,
             "comparison": comparison, "raw": raw,
             "worstPooled": None if wp is None else round(float(wp), 1),
-            "worstIndep": None if wi is None else round(float(wi), 1)}
+            "worstIndep": None if wi is None else round(float(wi), 1), **notes}
 
 
 def stability_excel(code: str, test_type: str, spec_low: float = 90.0,

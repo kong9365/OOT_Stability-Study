@@ -111,12 +111,35 @@ def _fmt_batch(v):
         return s
 
 
-def parse_month(특이사항, 시험종류):
-    """완제품 → 0개월. 안정성 → '기간 : N개월'에서 N 추출."""
+_RE_MONTH = re.compile(r"기간\s*:\s*(\d+)\s*개월")
+_RE_DAY = re.compile(r"기간\s*:\s*(\d+)\s*일")
+_RE_AT_MFG = re.compile(r"기간\s*:\s*제조\s*시")
+_DAYS_PER_MONTH = 30.4375   # kdp_core._approved_months 와 같은 환산 기준
+
+
+def classify_month(특이사항, 시험종류):
+    """(개월, 근거) — 근거: 완제품 / 개월 / 일 / 제조시 / None(해석 못 함).
+
+    일 단위(45·90·120일)는 30.4375일=1개월로 환산해 0.5개월 단위로 맞춘다(45일→1.5, 90일→3, 120일→4).
+    '제조시'는 제조 직후 시점이므로 0개월.
+    """
     if "완제품" in str(시험종류):
-        return 0.0
-    m = re.search(r"기간\s*:\s*(\d+)\s*개월", str(특이사항))
-    return float(m.group(1)) if m else None
+        return 0.0, "완제품"
+    s = str(특이사항)
+    m = _RE_MONTH.search(s)
+    if m:
+        return float(m.group(1)), "개월"
+    m = _RE_DAY.search(s)
+    if m:
+        return round(int(m.group(1)) / _DAYS_PER_MONTH * 2) / 2, "일"
+    if _RE_AT_MFG.search(s):
+        return 0.0, "제조시"
+    return None, None
+
+
+def parse_month(특이사항, 시험종류):
+    """완제품 → 0개월. 안정성 → '기간 : N개월' / 'N일'(환산) / '제조시'(0개월). 해석 못 하면 None."""
+    return classify_month(특이사항, 시험종류)[0]
 
 
 def is_lims_raw(file_or_path):

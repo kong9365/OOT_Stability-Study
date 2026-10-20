@@ -947,6 +947,33 @@ function stabPage() {
       <div style="${skpi}"><div style="font-size:10.5px;color:#8a94a6;margin-bottom:3px">추세</div><div style="font-size:15px;font-weight:600;color:#d97706;padding-top:3px">${worst ? esc(worst.trend) : '—'}</div></div>
       ${skpiBox('시점간 OOT', A.nOot + A.nWarn, ootColor)}</div></div>`;
 
+  // 시점(개월)을 못 읽어 빠진 줄 / 일·제조시 로 환산해 쓴 줄 — 조용히 넘기지 않고 알린다
+  const monthNote = (() => {
+    const um = A.unmatchedRemarks || [], cv = A.convertedRemarks || [], cf = A.monthConflicts || [];
+    if (!um.length && !cv.length && !cf.length && !A.specAssumed) return '';
+    const parts = [];
+    if (A.specAssumed) parts.push('<b>규격 문구를 읽지 못해 수동 입력 기본값(90~150)으로 계산했습니다.</b> 유효기간·규격 이탈·유의적 변화는 참고용이 아니라 판정하지 않았습니다. 시험기준 표기를 확인하세요.');
+    if (um.length) parts.push(`<b>시점을 읽지 못해 제외된 결과 ${A.unmatchedRows}건</b>: ` + um.map(u => `“${esc(u.remark)}” ${u.rows}건`).join(', ') + ' — 의뢰 특이사항 표기를 확인하세요.');
+    if (cf.length) parts.push('<b>의뢰 특이사항과 안정성 일정표가 달라 일정표를 따랐습니다</b>: ' + cf.map(c => `“${esc(c.remark)}” → 일정표 ${esc(c.schedule)} (${c.rows}건)`).join(', '));
+    if (cv.length) parts.push('환산해 사용: ' + cv.map(c => `“${esc(c.remark)}” → ${c.months}개월${c.by ? ' (' + esc(c.by) + ')' : ''} (${c.rows}건)`).join(', '));
+    const warn = um.length > 0 || cf.length > 0 || !!A.specAssumed;
+    return `<div style="margin-top:12px;padding:10px 14px;border-radius:10px;font-size:12.5px;line-height:1.55;border:1px solid ${warn ? '#f3dd9f' : '#d6dbe4'};background:${warn ? '#fffbeb' : '#f6f8fb'};color:${warn ? '#92400e' : '#46536a'}">${parts.join('<br>')}</div>`;
+  })();
+
+  // 규격 이탈(OOS)·가속 유의적 변화 — 추세 OOT 와 별개로 값이 규격 밖이면 모두 알린다
+  const oosBlock = (() => {
+    const oos = A.oos || [], sc = A.sigChange || [];
+    if (!oos.length && !sc.length) return '';
+    const rows = [];
+    if (oos.length) {
+      rows.push(`<div style="font-weight:700;color:#b91c1c;margin-bottom:5px">규격 이탈(OOS) ${oos.length}건</div>` + oos.map(o => `<div style="font-family:${MONO};font-size:12px;color:#7f1d1d">배치 ${esc(o.batch)} · ${o.time}개월 · ${o.value} → ${esc(o.side)} (규격 ${o.limit})</div>`).join(''));
+    }
+    if (sc.length) {
+      rows.push(`<div style="font-weight:700;color:#b91c1c;margin:${oos.length ? '10px' : '0'} 0 5px">가속시험 유의적 변화(ICH Q1A) — 초기값 대비 함량 5% 변화 또는 규격 이탈</div>` + sc.map(c => `<div style="font-family:${MONO};font-size:12px;color:#7f1d1d">배치 ${esc(c.batch)} · 초기 ${c.initial} (${c.initialTime}개월)${c.changePct == null ? '' : ` → ${c.changeTime}개월 ${c.changePct > 0 ? '+' : ''}${c.changePct}%${c.overLimit ? ' ⚠ 5% 이상' : ''}`}${c.oosCount ? ` · 규격 이탈 ${c.oosCount}건` : ''}</div>`).join(''));
+    }
+    return `<div style="margin-top:12px;padding:12px 16px;border-radius:12px;font-size:12.5px;line-height:1.55;border:1px solid #f6c9c9;background:#fef4f4">${rows.join('')}</div>`;
+  })();
+
   // ANCOVA
   const anc = A.ancova;
   let ancovaPanel;
@@ -979,6 +1006,15 @@ function stabPage() {
   }
 
   const legend = A.batches.map(b => `<div style="display:flex;align-items:center;gap:6px"><span style="width:14px;height:3px;border-radius:2px;background:${b.color}"></span><span style="font-family:${MONO};font-size:11.5px;color:#5b6573">배치 ${esc(b.batch)}</span></div>`).join('');
+  // 안정성 일정표 기준 진행·종료 (LIMS 계획 상태값은 관리되지 않아 쓰지 않는다)
+  const schedChip = (b) => {
+    const L = A.lotSchedule && A.lotSchedule[String(b.batch)];
+    if (!L) return '';
+    const C = { '종료': ['#ecfdf3', '#15803d'], '진행': ['#eef2ff', '#3730a3'], '지연': ['#fffbeb', '#b45309'], '중지': ['#f1f3f6', '#5b6573'] }[L.status] || ['#f1f3f6', '#5b6573'];
+    const nx = L.next ? ` · 다음 ${esc(L.next.period)}${L.next.date ? ' ' + esc(L.next.date) : ''}` : '';
+    const tip = `일정 ${L.done}/${L.total}건 의뢰 · 마지막 시점 ${esc(L.last)}${L.plans > 1 ? ` · 계획 ${L.plans}건 중 시점이 가장 많은 계획` : ''}`;
+    return `<div style="margin-top:9px;font-size:11px;color:#5b6573" title="${tip}"><span style="font-weight:600;padding:2px 9px;border-radius:999px;background:${C[0]};color:${C[1]}">${esc(L.status)}</span> <span style="font-family:${MONO}">${L.done}/${L.total}${nx}</span></div>`;
+  };
   const batchCards = A.batches.map(b => {
     const isW = worst && b.batch === worst.batch;
     const bShort = b.shelf != null && b.approved != null && b.shelf < b.approved;
@@ -995,7 +1031,7 @@ function stabPage() {
         <div style="display:flex;justify-content:space-between"><span style="color:#8a94a6">시점 n</span><span style="font-family:${MONO};font-weight:600">${b.n}</span></div></div>
       <div style="margin-top:11px;padding-top:11px;border-top:1px solid #eef1f5;display:flex;justify-content:space-between;align-items:center">
         <span style="font-family:${MONO};font-size:11.5px;color:#5b6573">함량(%) = ${b.intercept == null ? '—' : b.intercept.toFixed(2)} + (${b.slope == null ? '—' : b.slope.toFixed(4)})·t</span>
-        ${b.approved != null ? `<span style="font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;${bShort ? 'background:#fde0e0;color:#b91c1c' : 'background:#eef1f5;color:#5b6573'}">허가 ${b.approved}개월${bShort ? ' ⚠' : ''}</span>` : ''}</div>${stepsDetails(b)}</div>`;
+        ${b.approved != null ? `<span style="font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;${bShort ? 'background:#fde0e0;color:#b91c1c' : 'background:#eef1f5;color:#5b6573'}">허가 ${b.approved}개월${bShort ? ' ⚠' : ''}</span>` : ''}</div>${schedChip(b)}${stepsDetails(b)}</div>`;
   }).join('');
 
   const chartBlock = `<div style="display:flex;gap:18px;margin-top:18px;align-items:flex-start;flex-wrap:wrap">
@@ -1036,7 +1072,7 @@ function stabPage() {
     본 결과는 자동 산출 참고값입니다. 최종 유효기간은 QC 책임자 검토·승인 및 ICH Q1A/Q1E·사내 SOP 확인이 필요합니다. 규격하한/상한이 데이터에 없을 경우 수동 입력값(기본 90/150)을 사용합니다.</div>`;
 
   const subInfo = `<span style="font-size:11.5px;color:#9aa4b4;font-family:${MONO};margin-left:auto">시험항목 ${esc(A.testItem)} · 배치 ${A.batchCount} · 시점쌍 ${A.pairCount}</span>`;
-  return `<div style="padding:26px 30px 60px;max-width:1320px;width:100%">${head}${control}${banner}${ancovaPanel}${chartBlock}${stabSummaryTable()}${stabRawTable()}${footer}</div>`;
+  return `<div style="padding:26px 30px 60px;max-width:1320px;width:100%">${head}${control}${banner}${oosBlock}${monthNote}${ancovaPanel}${chartBlock}${stabSummaryTable()}${stabRawTable()}${footer}</div>`;
 }
 
 /* ============================ ALARM PAGE ============================ */

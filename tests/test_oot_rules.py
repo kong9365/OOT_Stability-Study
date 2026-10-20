@@ -100,7 +100,8 @@ A4EF25C_LINES = [
     "    ON tor.PLANT_CD=trr.PLANT_CD AND tor.REQUEST_ID=trr.REQUEST_ID",
     "  LEFT JOIN `{c}`.bronze.lims_dbo_test_testitem_result ttr",
     "    ON ttr.PLANT_CD=tor.PLANT_CD AND ttr.REQUEST_ID=tor.REQUEST_ID AND ttr.ORDER_ID=tor.ORDER_ID",
-    "  WHERE trr.PLANT_CD='{p}' AND ttr.TESTITEM_ID IS NOT NULL",
+    # 모집단 결정(2026-10-21): 승인(ORDER_STATUS='90')만. 되돌림 스위치 OOT_APPROVED_ONLY=0 일 때만 이 줄이 빠진다.
+    "  WHERE trr.PLANT_CD='{p}' AND ttr.TESTITEM_ID IS NOT NULL AND tor.ORDER_STATUS = '90'",
     "  QUALIFY ROW_NUMBER() OVER (",
     "    PARTITION BY trr.PLANT_CD,trr.REQUEST_ID,tor.ORDER_ID,ttr.TESTITEM_ID",
     "    ORDER BY ttr.UPDATE_TIME DESC, tor.UPDATE_TIME DESC",
