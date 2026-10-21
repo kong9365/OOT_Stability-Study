@@ -4,7 +4,7 @@ oot_export.py — OOT 넘김 파일(줄 단위 판정 자료 + 머리표)을 만
 
 화면(/api/oot/lots)과 같은 계산(kdp_core.judge_rows)을 시험종류 7개 전체 줄에 돌려, 우리 검토
 도구가 참고 자료로 받아 갈 파일을 만든다. 웹 프로세스 안에서는 계산하지 않는다(M4):
-일정 흐름과 POST /api/oot/export/run 은 start_child() 로 자식 프로세스만 띄운다.
+일정 흐름은 start_child() 로 자식 프로세스만 띄운다(HTTP 주소는 없다 — 받는 앱은 보관함을 직접 읽는다).
 - 한 번에 하나만: 프로세스 안 잠금 + 저장소의 '도는 중' 표지(oot_export_running.json)
 - 하루 한 번: 03:45 KST 이후, 그날 이미 시도했으면(oot_export_state.json 의 attempt_day) 다시 돌지 않음
 - 매번 '마지막 시도' 상태(시각·성공 여부·까닭·자료 기준 시각)를 남긴다(G1)

@@ -9,7 +9,6 @@ webapp/ 정적 프론트엔드를 서빙하고, OOT/안정성/알림 JSON API를
 """
 from __future__ import annotations
 
-import hmac
 import json
 import os
 import re
@@ -18,7 +17,7 @@ import time
 import urllib.parse
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -565,55 +564,11 @@ def api_refresh():
     return {"ok": True, "cleared": n, "skipped": False}
 
 
-# ── OOT 넘김 파일(우리 검토 도구가 받아 감) ──────────────────────────────────
-# 머리말 X-OOT-Export-Key 를 전용 환경값 OOT_EXPORT_KEY 와 비교한다(API_KEY 는 쓰지 않음).
-# 값이 없으면 503(닫힘), 틀리면 401. 비교는 시간차가 새지 않게, 오류 글에 열쇠를 넣지 않는다.
-# 계산은 oot_export 가 자식 프로세스로 한다 — 여기서는 얇게 연결만.
-_EXPORT_ID = re.compile(r"[0-9a-f]{12}")
-
-
-def _require_export_key(x_oot_export_key: Optional[str] = Header(None)) -> None:
-    want = os.environ.get("OOT_EXPORT_KEY", "")
-    if not want:
-        raise HTTPException(503, "넘김 주소가 아직 열리지 않았습니다(열쇠 미설정).")
-    got = (x_oot_export_key or "").encode("utf-8")
-    if not hmac.compare_digest(got, want.encode("utf-8")):
-        raise HTTPException(401, "열쇠가 맞지 않습니다.")
-
-
-@app.get("/api/oot/export/latest", dependencies=[Depends(_require_export_key)])
-def api_oot_export_latest():
-    """현재 머리표 + 마지막 시도 상태(last_attempt). 판이 아직 없으면 404 와 마지막 시도 상태."""
-    try:
-        meta, attempt = oot_export.read_latest()
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
-    if meta is None:
-        return JSONResponse({"detail": "아직 넘김 파일이 없습니다.", "last_attempt": attempt}, status_code=404)
-    return {**meta, "last_attempt": attempt}
-
-
-@app.get("/api/oot/export/{export_id}/rows.jsonl.gz", dependencies=[Depends(_require_export_key)])
-def api_oot_export_rows(export_id: str):
-    """줄 파일(gzip JSON Lines). 판 id 는 12자리 16진수만."""
-    if not _EXPORT_ID.fullmatch(export_id):
-        raise HTTPException(404, "없는 판입니다.")
-    try:
-        data = oot_export.read_rows(export_id)
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
-    if data is None:
-        raise HTTPException(404, "없는 판입니다.")
-    return Response(content=data, media_type="application/gzip")
-
-
-@app.post("/api/oot/export/run", dependencies=[Depends(_require_export_key)])
-def api_oot_export_run():
-    """넘김 파일 만들기를 자식 프로세스로 띄운다. 이미 도는 중이면 state='running'."""
-    try:
-        return {"state": oot_export.start_child()}
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
+# ── OOT 넘김 파일 ─────────────────────────────────────────────────────────────
+# 넘김 파일은 이 앱이 보관함(oot-export/)에 만들어 둘 뿐, HTTP 로 내려주는 주소는 두지 않는다.
+# (옛 /api/oot/export/* 와 고정 열쇠 OOT_EXPORT_KEY 는 쓰는 곳이 없고 사용자 인가·만료·요청 제한이
+#  없어 2026-10-21 보안 점검 지적에 따라 없앴다.) 받는 앱은 보관함을 읽기 전용으로 직접 읽는다.
+# 계산은 oot_export 가 자식 프로세스로 한다 — 일정 흐름(아래 startup)만 이 앱이 띄운다.
 
 
 @app.on_event("startup")
@@ -625,20 +580,16 @@ def _startup_prewarm():
 @app.on_event("startup")
 def _startup_export_schedule():
     """넘김 파일 일정 흐름(03:45 KST 이후 하루 한 번).
-    보관함이 S3(axhub 에 올라간 앱)이거나 열쇠(OOT_EXPORT_KEY, 디스크 모드 개발용)가 있으면 띄운다.
-    끄는 스위치 OOT_EXPORT_OFF=1 이면 어느 경우든 띄우지 않는다."""
+    보관함이 S3(axhub 에 올라간 앱)일 때만 띄운다. 끄는 스위치 OOT_EXPORT_OFF=1 이면 띄우지 않는다."""
     mode = storage_io.export_mode()
     if os.environ.get("OOT_EXPORT_OFF") == "1":
         on, why = False, "끄는 스위치(OOT_EXPORT_OFF=1)가 켜져 있음"
     elif mode == "s3":
         on, why = True, "보관함(S3) 설정됨"
-    elif os.environ.get("OOT_EXPORT_KEY"):
-        on, why = True, ("열쇠가 있음(보관함 S3 준비 실패 — 일정 점검이 실패할 수 있음)" if mode == "s3-broken"
-                         else "열쇠가 있음(디스크 모드 개발용)")
     elif mode == "s3-broken":
         on, why = False, "보관함(S3) 설정은 있으나 연결 준비에 실패함"
     else:
-        on, why = False, "보관함이 S3 가 아니고 열쇠도 없음"
+        on, why = False, "보관함이 S3 가 아님"
     print(f"넘김 파일 일정: {'켬' if on else '끔'} — {why}", flush=True)
     if on:
         threading.Thread(target=oot_export.scheduler_loop, daemon=True).start()
