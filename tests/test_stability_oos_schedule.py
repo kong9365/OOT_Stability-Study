@@ -182,20 +182,35 @@ def test_schedule_failure_falls_back_to_remark(fake_dbx):
     assert a["ok"] and "lotSchedule" not in a and "monthConflicts" not in a
 
 
-# ── 모집단: 승인만 / 알람은 승인 전 포함 ─────────────────────────────────────────
-def test_population_approved_only_except_alarm(monkeypatch):
+# ── 모집단: 기본은 승인 전 포함(시험자가 승인 전에 OOT 확인) / 스위치로 승인만 ────────────
+def test_population_includes_unapproved_by_default(monkeypatch):
     import databricks_client as dbx
     import kdp_core
     import oot_export
-    gate = "tor.ORDER_STATUS = '90'"
-    assert gate in kdp_core._COMMON_CTE          # 화면·엑셀·안정성·APQR
-    assert gate in kdp_core._OOT_CTE             # 보관함 넘김
-    assert gate in oot_export.ROWS_SQL and gate in oot_export.COUNT_SQL
-    assert "ORDER_STATUS" not in kdp_core._OOT_CTE_ALARM   # 알람은 승인 전 결과도
-    # 나머지 규칙(①~④)은 같아야 한다 — 승인 조건 한 줄만 빠진 것
-    assert kdp_core._OOT_CTE.replace(kdp_core._APPROVED_SQL, "") == kdp_core._OOT_CTE_ALARM
-
+    assert kdp_core._APPROVED_ONLY is False and kdp_core._APPROVED_SQL == ""
+    for sql in (kdp_core._COMMON_CTE, kdp_core._OOT_CTE, kdp_core._OOT_CTE_ALARM,
+                oot_export.ROWS_SQL, oot_export.COUNT_SQL):
+        assert "ORDER_STATUS" not in sql
     seen = []
     monkeypatch.setattr(dbx, "query", lambda sql, params=None, large=False: seen.append(sql) or [])
     kdp_core.fetch_oot_rows_for_types([F.TT_FIN])
     assert seen and "ORDER_STATUS" not in seen[0]
+
+
+def test_approved_only_switch(tmp_path):
+    """OOT_APPROVED_ONLY=1 이면 화면·넘김은 승인만, 알람은 그래도 승인 전 포함(새 프로세스에서 확인)."""
+    import os
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = ("import kdp_core as k, oot_export as e;"
+            "g=\"tor.ORDER_STATUS = '90'\";"
+            "assert g in k._COMMON_CTE and g in k._OOT_CTE and g in e.ROWS_SQL;"
+            "assert 'ORDER_STATUS' not in k._OOT_CTE_ALARM;"
+            "assert k._OOT_CTE.replace(k._APPROVED_SQL, '') == k._OOT_CTE_ALARM;print('ok')")
+    env = {**os.environ, "OOT_APPROVED_ONLY": "1", "PYTHONIOENCODING": "utf-8"}
+    for k in ("STORAGE_ENDPOINT", "STORAGE_BUCKET", "STORAGE_ACCESS_KEY", "STORAGE_SECRET_KEY"):
+        env.pop(k, None)
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True,
+                       encoding="utf-8")
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr[-800:]

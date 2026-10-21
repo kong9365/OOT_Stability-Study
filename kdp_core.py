@@ -135,10 +135,10 @@ def clear_data_cache() -> int:
 #  - _OOT_CTE: 넘김(oot_export) 전용(알람은 승인 전 결과도 보는 _OOT_CTE_ALARM). 각자 따로 묻는 조회문이라 ④ 까지 낸다.
 # 정규식·백슬래시 없이 LIKE·replace·try_cast 만 써서 Databricks 와 오프라인(DuckDB)에서 같은 글로 돈다.
 #
-# 모집단(2026-10-21 결정): 정식 결과 = 지시 상태 승인(ORDER_STATUS='90')인 것만. 미승인(작성·검토 중,
-# 약 188행)은 아직 확정 전이라 뺀다. 재시험 원값 제외(④ D-4)는 그대로 둔다. 되돌리려면 환경변수
-# OOT_APPROVED_ONLY=0 (코드 수정·재배포 없이 재시작만).
-_APPROVED_ONLY = os.getenv("OOT_APPROVED_ONLY", "1").strip() not in ("0", "false", "False", "")
+# 모집단: 승인 전 결과도 포함한다(기본). 시험자가 시험을 마친 뒤 승인 전에 OOT 를 확인해야 하기 때문
+# (2026-10-21 승인만 쓰도록 바꿨다가 같은 날 되돌림 — 최근 2주 지시의 절반가량이 승인 전이라 화면에서 사라졌다).
+# 승인(ORDER_STATUS='90')만 쓰려면 환경변수 OOT_APPROVED_ONLY=1 (재배포 필요). 재시험 원값 제외(④ D-4)는 그대로.
+_APPROVED_ONLY = os.getenv("OOT_APPROVED_ONLY", "0").strip() in ("1", "true", "True")
 _APPROVED_SQL = "AND tor.ORDER_STATUS = '90'" if _APPROVED_ONLY else ""
 _RESULTS_CTE = f"""
 WITH results AS (
