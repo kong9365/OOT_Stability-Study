@@ -23,8 +23,8 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import kdp_core as core  # databricks_client(인증서 주입)를 보관함·메일 모듈보다 먼저
 import axhub_mail
-import kdp_core as core
 import kst
 import oot_export
 import oot_group

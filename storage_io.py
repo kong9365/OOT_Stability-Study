@@ -20,6 +20,16 @@ _ENDPOINT = os.environ.get("STORAGE_ENDPOINT")
 _BUCKET = os.environ.get("STORAGE_BUCKET")
 _PREFIX = "oot-state/"
 
+# 사내 인증서(truststore) 주입은 boto3·urllib3 를 부르기 **전에** 해야 한다. 뒤에 하면(예: 이 모듈을
+# databricks_client 보다 먼저 import) S3 호출이 'maximum recursion depth exceeded' 로 실패하고, 읽기는
+# 조용히 빈 값이 된다(2026-10-22 스테이징에서 확인·재현). 주입은 여러 번 해도 같다.
+try:
+    import truststore
+
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 _s3 = None
 if _ENDPOINT and _BUCKET:
     try:

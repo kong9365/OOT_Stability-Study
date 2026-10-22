@@ -116,3 +116,21 @@ def test_kst_is_utc_plus_9():
     import kst
     utc = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     assert abs((kst.now() - utc) - dt.timedelta(hours=9)) < dt.timedelta(seconds=5)
+
+
+def test_truststore_injected_before_boto3_whatever_import_order():
+    """storage_io 를 먼저 불러와도 인증서 주입이 boto3 보다 앞선다(뒤면 S3 호출이 재귀 오류)."""
+    import os
+    import subprocess
+    import sys
+    pytest.importorskip("truststore")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {**os.environ, "STORAGE_ENDPOINT": "https://storage.example.test", "STORAGE_BUCKET": "b",
+           "STORAGE_ACCESS_KEY": "k", "STORAGE_SECRET_KEY": "s", "PYTHONIOENCODING": "utf-8"}
+    code = ("import sys, axhub_mail, storage_io, ssl, truststore\n"
+            "assert storage_io._s3 is not None\n"
+            "assert ssl.SSLContext is truststore.SSLContext\n"
+            "print('ok')")
+    r = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True,
+                       encoding="utf-8")
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr[-600:]
