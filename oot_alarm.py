@@ -28,7 +28,6 @@ import argparse
 import os
 import sys
 import time
-from datetime import datetime
 
 from dotenv import load_dotenv
 
@@ -38,6 +37,8 @@ sys.path.insert(0, _HERE)
 import kdp_core as core  # noqa: E402
 import storage_io  # noqa: E402
 import oot_mail  # noqa: E402
+import axhub_mail  # noqa: E402
+import kst  # noqa: E402
 
 STATE_PATH = os.path.join(_HERE, ".oot_alarm_state.json")
 KEY_MARK = "#keys-v2"                    # 발송 기록 열쇠를 새 꼴로 옮겼다는 표지(옛 코드는 무시)
@@ -54,7 +55,7 @@ OOT_TEST_TYPES = [
 
 
 def _log(msg: str) -> None:
-    line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
+    line = f"[{kst.now():%Y-%m-%d %H:%M:%S}] {msg}"
     print(line, flush=True)
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
@@ -208,7 +209,7 @@ def check_once() -> None:
     for tt, keys in sendable.items():
         grp = _grp(tt)
         recs = [cur[k] for k in keys]
-        subj = f"[OOT 알람] {tt} 신규 {len(recs)}건 ({datetime.now():%Y-%m-%d %H:%M})"
+        subj = f"[OOT 알람] {tt} 신규 {len(recs)}건 ({kst.now():%Y-%m-%d %H:%M})"
         ok, msg = oot_mail.send_oot_alert(recs, cfg=cfg, subject=subj,
                                           dashboard_url=DASH_URL, recipients=grp)
         if ok:
@@ -225,13 +226,13 @@ def check_once() -> None:
 
 
 def _seconds_until_daily(hhmm: str) -> float:
-    """다음 hhmm(HH:MM)까지 남은 초. 형식 오류면 07:30으로 폴백."""
+    """다음 hhmm(HH:MM, 한국 시간)까지 남은 초. 형식 오류면 07:30으로 폴백."""
     from datetime import timedelta
     try:
         hh, mm = [int(x) for x in str(hhmm).strip().split(":")]
     except Exception:
         hh, mm = 7, 30
-    now = datetime.now()
+    now = kst.now()          # 컨테이너 시계(UTC)가 아니라 한국 시간 기준
     tgt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
     if tgt <= now:
         tgt += timedelta(days=1)
@@ -285,7 +286,7 @@ def main():
         return f"매일 {dt} 실행" if mode == "daily" else f"{iv}분 주기"
 
     mode, dt, iv = _load_schedule()
-    _log(f"OOT 자동 알람 시작 · {_desc(mode, dt, iv)} (Ctrl+C 종료)")
+    _log(f"OOT 자동 알람 시작 · {_desc(mode, dt, iv)}(한국 시간) · 메일: {axhub_mail.transport_name()} (Ctrl+C 종료)")
     last_sig, last_run, next_run = None, None, 0.0
     while True:
         mode, dt, iv = _load_schedule()

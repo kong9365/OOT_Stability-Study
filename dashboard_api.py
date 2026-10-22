@@ -17,13 +17,15 @@ import time
 import urllib.parse
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import axhub_mail
 import kdp_core as core
+import kst
 import oot_export
 import oot_group
 import oot_mail
@@ -37,6 +39,29 @@ _GROUPS = oot_group.GroupStore(os.path.join(_HERE, "item_groups.json"))
 
 app = FastAPI(title="광동 품질·시험 통합 대시보드 API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def _remember_user(request, call_next):
+    """플랫폼 메일 수신자 사전 — 들어온 사람의 SSO 머리말(사용자 ID·이메일)을 기억한다(실패 무시)."""
+    try:
+        axhub_mail.remember_from_headers(request.headers)
+    except Exception:
+        pass
+    return await call_next(request)
+
+
+def _refresh_directory(request, force: bool = False) -> str:
+    """알림설정 화면을 연 관리자의 로그인으로 앱 멤버 목록을 읽어 수신자 사전을 채운다."""
+    try:
+        return axhub_mail.refresh_from_members(request.cookies.get("_hub_access", ""), force=force)[1]
+    except Exception as e:  # noqa: BLE001
+        return f"멤버 목록 확인 실패({type(e).__name__})"
+
+
+def _mail_status(emails: list[str]) -> dict:
+    ids, missing = axhub_mail.resolve(emails)
+    return {"transport": axhub_mail.transport_name(), "resolved": len(ids), "unresolved": missing}
 
 
 # ── OOT ──────────────────────────────────────────────────────────────────────
@@ -290,7 +315,8 @@ def _schedule_label(s: dict) -> str:
 
 
 @app.get("/api/alarm/config")
-def api_alarm_get():
+def api_alarm_get(request: Request):
+    _refresh_directory(request)                 # 10분에 한 번 — 수신자 사전 최신화
     cfg = oot_mail.load_config()
     prefs = _load_prefs()
     sched = {**_DEFAULT_SCHEDULE, **(cfg.get("schedule") or {})}
@@ -301,6 +327,7 @@ def api_alarm_get():
         "interval": _schedule_label(sched),
         "schedule": sched,
         "night": prefs.get("night", True),
+        "mail": _mail_status(_all_group_emails()),
     }
 
 
@@ -355,7 +382,7 @@ def api_alarm_history(days: int = Query(30, ge=0, le=3650), limit: int = Query(3
     import csv as _csv
     import re
     from datetime import datetime as _dt, timedelta as _td
-    cutoff = (_dt.now() - _td(days=days)).strftime("%Y-%m-%d %H:%M:%S") if days else ""
+    cutoff = (kst.now() - _td(days=days)).strftime("%Y-%m-%d %H:%M:%S") if days else ""
 
     sent: list[dict] = []
     path = getattr(oot_mail, "SENT_LOG_PATH", os.path.join(_HERE, "oot_alarm_sent.csv"))
@@ -452,8 +479,9 @@ def _all_group_emails() -> list[str]:
 
 
 @app.post("/api/alarm/test")
-def api_alarm_test():
+def api_alarm_test(request: Request):
     """테스트 메일 1건 발송(연동 확인) — 전 그룹 수신자 합집합으로."""
+    note = _refresh_directory(request, force=True) if axhub_mail.available() else ""
     to = _all_group_emails()
     if not to:
         return {"ok": False, "msg": "수신 그룹에 등록된 수신자가 없습니다(시험종류별 그룹을 먼저 저장하세요)."}
@@ -462,7 +490,8 @@ def api_alarm_test():
               "평균": "100", "표준편차": "10"}]
     ok, msg = oot_mail.send_oot_alert(dummy, subject="[OOT 테스트] 알림 발송 확인",
                                       dashboard_url=os.getenv("OOT_DASHBOARD_URL", ""), recipients=to)
-    return {"ok": ok, "msg": msg}
+    msg = f"[{axhub_mail.transport_name()}] {msg}" + (f" ({note})" if note else "")
+    return {"ok": ok, "msg": msg, "mail": _mail_status(to)}
 
 
 # ── 수신자 마스터 DB ───────────────────────────────────────────────────────────
@@ -528,7 +557,7 @@ def api_groups_get():
 
 
 @app.post("/api/recipients/groups")
-def api_groups_set(body: GroupsBody):
+def api_groups_set(body: GroupsBody, request: Request):
     """시험종류별 그룹 저장 + recipients(합집합) 동기화."""
     # DB에 존재하는 이메일만 허용(정합성)
     valid = {r["email"].strip().lower() for r in recipients_db.load_db()}
@@ -541,7 +570,8 @@ def api_groups_set(body: GroupsBody):
     cfg["recipient_groups"] = clean
     cfg["recipients"] = _union_of(clean)
     oot_mail.save_config(cfg)
-    return {"ok": True, "groups": clean}
+    _refresh_directory(request)
+    return {"ok": True, "groups": clean, "mail": _mail_status(_union_of(clean))}
 
 
 _REFRESH_MIN_SEC = 600                      # 새로고침은 10분에 한 번(작은 웨어하우스 보호)
@@ -569,6 +599,12 @@ def api_refresh():
 # (옛 /api/oot/export/* 와 고정 열쇠 OOT_EXPORT_KEY 는 쓰는 곳이 없고 사용자 인가·만료·요청 제한이
 #  없어 2026-10-21 보안 점검 지적에 따라 없앴다.) 받는 앱은 보관함을 읽기 전용으로 직접 읽는다.
 # 계산은 oot_export 가 자식 프로세스로 한다 — 일정 흐름(아래 startup)만 이 앱이 띄운다.
+
+
+@app.on_event("startup")
+def _startup_mail_mode():
+    """메일 발송 길을 기동 로그에 한 줄(비밀값 없음) — 플랫폼 메일 값이 들어왔는지 확인용."""
+    print(f"메일 발송 방식: {axhub_mail.transport_name()}", flush=True)
 
 
 @app.on_event("startup")

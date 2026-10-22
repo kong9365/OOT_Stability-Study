@@ -15,6 +15,7 @@ network_gate.json.bak_*
 
 # === 직원 개인정보 / 수신자 명단 ===
 recipients_db.json
+user_directory.json
 oot_alert_config.json
 
 # === 실데이터·운영 로그/캐시 ===

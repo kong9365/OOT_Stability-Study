@@ -97,6 +97,6 @@ def test_axhub_manifest_has_no_export_key():
     with open(os.path.join(root, ".dockerignore"), encoding="utf-8") as f:
         ignored = {ln.strip() for ln in f if ln.strip() and not ln.startswith("#")}
     assert {".env", "recipients_db.json", "oot_alert_config.json", ".oot_alarm_state.json",
-            "oot_export_*", "tests/", "offline_dbx.py", ".git/"} <= ignored
+            "oot_export_*", "tests/", "offline_dbx.py", ".git/", "user_directory.json"} <= ignored
     with open(os.path.join(root, ".gitignore"), encoding="utf-8") as f:
         assert "oot_export_*" in {ln.strip() for ln in f}

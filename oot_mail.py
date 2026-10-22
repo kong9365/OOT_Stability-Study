@@ -11,11 +11,12 @@ import json
 import os
 import smtplib
 import sys
-from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
 
+import axhub_mail
+import kst
 import storage_io
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -148,7 +149,7 @@ def log_sent(records: list[dict], to_addrs: list[str]) -> None:
     """발송된 건을 oot_alarm_sent.csv 에 누적 기록(감사·추적)."""
     import csv as _csv
     import io as _io
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = kst.now().strftime("%Y-%m-%d %H:%M:%S")
     is_new = not storage_io.exists(SENT_LOG_PATH)
     buf = _io.StringIO()
     w = _csv.writer(buf)
@@ -165,7 +166,7 @@ def log_sent(records: list[dict], to_addrs: list[str]) -> None:
 
 def build_oot_email_html(records: list[dict], dashboard_url: str = "") -> str:
     """신규 OOT 행 목록 → HTML 메일 본문. 시험종류 맨 앞, 알림ID(추적용) 맨 뒤."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = kst.now().strftime("%Y-%m-%d %H:%M")
     rows = ""
     for r in records[:80]:
         st = str(r.get("분류", ""))
@@ -214,6 +215,31 @@ def build_oot_email_html(records: list[dict], dashboard_url: str = "") -> str:
     </div></body></html>"""
 
 
+COMPACT_LIMIT = 2000      # 플랫폼 메일 본문 상한(공식 문서 '본문 2000자') — 넘지 않게 줄인다
+
+
+def build_oot_email_html_compact(records: list[dict], dashboard_url: str = "",
+                                 limit: int = COMPACT_LIMIT) -> str:
+    """플랫폼 메일용 짧은 HTML — 본문 상한 안에 들도록 줄 수를 줄이고 '외 N건'을 붙인다."""
+    now = kst.now().strftime("%Y-%m-%d %H:%M")
+    head = f"<p><b>OOT 알람 — 신규 {len(records)}건</b> ({now})</p><ul>"
+    tail_link = f'<p><a href="{dashboard_url}">대시보드에서 확인</a></p>' if dashboard_url else ""
+    items: list[str] = []
+    for r in records:
+        st = str(r.get("분류", ""))
+        items.append(f"<li>[{r.get('시험종류', '-')}] {r.get('품목', '-')}({r.get('품목코드', '')}) "
+                     f"{r.get('제조번호', '-')} · {r.get('시험항목', '-')} = <b>{r.get('결과값', '-')}</b> "
+                     f"(μ {r.get('평균', '-')} / σ {r.get('표준편차', '-')}) {st} · {alert_id(r)}</li>")
+    body = items
+    while True:
+        rest = len(records) - len(body)
+        more = f"<li>외 {rest}건 — 대시보드에서 확인하세요.</li>" if rest else ""
+        html = head + "".join(body) + more + "</ul>" + tail_link
+        if len(html) <= limit or not body:
+            return html[:limit]
+        body = body[:-1]
+
+
 def send_oot_alert(records: list[dict], cfg: dict[str, Any] | None = None,
                    subject: str | None = None, dashboard_url: str = "",
                    recipients: list[str] | None = None) -> tuple[bool, str]:
@@ -226,10 +252,24 @@ def send_oot_alert(records: list[dict], cfg: dict[str, Any] | None = None,
     to = [a.strip() for a in src if a and a.strip()]
     if not to:
         return False, "수신자가 설정되지 않았습니다(알림설정에서 등록)."
+    subj = subject or f"[OOT 알람] 신규 {len(records)}건 ({kst.now():%Y-%m-%d %H:%M})"
+    # 운영(axhub): 밖으로 HTTPS 만 나가므로 SMTP 대신 플랫폼 메일(사용자 ID 로 발송)
+    if axhub_mail.available():
+        ids, missing = axhub_mail.resolve(to)
+        miss_note = (f" · 사용자 ID 를 못 찾은 수신자 {len(missing)}명({', '.join(missing)}) — "
+                     "앱에 한 번 접속하거나 이 앱의 멤버로 초대되어야 합니다") if missing else ""
+        if not ids:
+            return False, "보낼 수 있는 수신자가 없습니다" + miss_note
+        ok, msg = axhub_mail.send_mail(ids, subj, build_oot_email_html_compact(records, dashboard_url))
+        if ok:
+            try:
+                log_sent(records, [e for e in to if e not in missing])
+            except Exception:
+                pass
+        return ok, msg + miss_note
     sk = _smtp_kwargs(cfg)
     if not sk["smtp_user"]:
         return False, "SMTP 발신 계정 미설정(QMS_SMTP_USER 또는 알림설정)."
-    subj = subject or f"[OOT 알람] 신규 {len(records)}건 ({datetime.now():%Y-%m-%d %H:%M})"
     body = build_oot_email_html(records, dashboard_url)
     # QMS 모듈이 있으면 그것을, 없으면 내장 SMTP 함수로 발송(다른 노트북 자체완결)
     _sender = _qms.send_email if _qms is not None else _send_email_smtp
