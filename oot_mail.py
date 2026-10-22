@@ -48,8 +48,9 @@ def hash_password(p: str) -> str:
     return hashlib.sha256(str(p).encode("utf-8")).hexdigest()
 
 
-# 알림설정 진입 비밀번호 — 이 프로젝트 .env(OOT_ALERT_PASSWORD)에서 관리. 미설정 시 기본 131103.
-_INITIAL_PW = os.environ.get("OOT_ALERT_PASSWORD", "").strip() or "131103"
+# 알림설정 진입 비밀번호 — 환경변수 OOT_ALERT_PASSWORD(secret) 또는 화면에서 정한 해시. 코드에 기본값을 두지
+# 않는다(소스가 보이면 누구나 알게 됨). 예전 기본값의 해시는 '설정 안 됨'으로 보고 거절한다(2026-10-22).
+_LEGACY_DEFAULT_HASHES = {"6664b01eaf7d6cfb6adf8084ac6f1f31fc2924142681a7d4c66fa11fffc1594f"}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "recipients": [],          # 수신자 이메일 목록
@@ -60,7 +61,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "smtp_pass": "",           # 비우면 QMS_SMTP_PASS
     "enabled": True,
     "recipient_groups": {},    # {시험종류: [이메일,...]} — 시험종류별 수신 그룹
-    "password_hash": hash_password(_INITIAL_PW),   # 평문 미저장(sha256)
+    "password_hash": "",       # 평문 미저장(sha256). 비어 있으면 비밀번호 진입 불가(소유자 역할로만)
     # 알람 실행 스케줄(oot_alarm.py 가 매 루프 읽음). save_config 는 이 dict 의 키만 저장하므로 반드시 등록.
     "schedule": {"mode": "daily", "daily_time": "07:30", "interval_min": 10},
 }
@@ -72,7 +73,18 @@ def check_password(p: str, cfg: dict[str, Any] | None = None) -> bool:
     if env_pw:
         return str(p) == env_pw
     cfg = cfg or load_config()
-    return hash_password(p) == cfg.get("password_hash", hash_password(_INITIAL_PW))
+    h = str(cfg.get("password_hash") or "")
+    if not password_is_set(cfg) or not str(p or ""):
+        return False
+    return hash_password(p) == h
+
+
+def password_is_set(cfg: dict[str, Any] | None = None) -> bool:
+    """진입 비밀번호가 정해져 있는가(환경변수 또는 예전 기본값이 아닌 해시)."""
+    if os.environ.get("OOT_ALERT_PASSWORD", "").strip():
+        return True
+    h = str((cfg or load_config()).get("password_hash") or "")
+    return bool(h) and h not in _LEGACY_DEFAULT_HASHES
 
 
 def password_from_env() -> bool:
@@ -91,8 +103,9 @@ def load_config() -> dict[str, Any]:
 
 
 def save_config(cfg: dict[str, Any]) -> None:
-    """기존 저장본과 병합 저장 — 부분 저장 시 미포함 키(예: password_hash) 보존."""
-    existing = storage_io.read_json(CONFIG_PATH, default={}) or {}
+    """기존 저장본과 병합 저장 — 부분 저장 시 미포함 키(예: password_hash) 보존.
+    기존 저장본을 읽다가 오류가 나면 저장하지 않는다(빈 값으로 보고 덮으면 수신 그룹이 지워진다)."""
+    existing = storage_io.read_json_strict(CONFIG_PATH, default={}) or {}
     merged = dict(DEFAULT_CONFIG)
     merged.update(existing)
     merged.update({k: v for k, v in cfg.items() if k in DEFAULT_CONFIG})
@@ -256,8 +269,9 @@ def send_oot_alert(records: list[dict], cfg: dict[str, Any] | None = None,
     # 운영(axhub): 밖으로 HTTPS 만 나가므로 SMTP 대신 플랫폼 메일(사용자 ID 로 발송)
     if axhub_mail.available():
         ids, missing = axhub_mail.resolve(to)
-        miss_note = (f" · 사용자 ID 를 못 찾은 수신자 {len(missing)}명({', '.join(missing)}) — "
-                     "앱에 한 번 접속하거나 이 앱의 멤버로 초대되어야 합니다") if missing else ""
+        # 결과 글은 화면·로그로 가므로 이메일 주소는 넣지 않는다(개수만). 누구인지는 관리자 화면에서 본다.
+        miss_note = (f" · 사용자 ID 를 못 찾은 수신자 {len(missing)}명 — 앱에 한 번 접속하거나 "
+                     "이 앱의 멤버로 초대되어야 합니다") if missing else ""
         if not ids:
             return False, "보낼 수 있는 수신자가 없습니다" + miss_note
         ok, msg = axhub_mail.send_mail(ids, subj, build_oot_email_html_compact(records, dashboard_url))

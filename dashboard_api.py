@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import threading
 import time
 import urllib.parse
@@ -45,7 +46,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def _remember_user(request, call_next):
     """플랫폼 메일 수신자 사전 — 들어온 사람의 SSO 머리말(사용자 ID·이메일)을 기억한다(실패 무시)."""
     try:
-        axhub_mail.remember_from_headers(request.headers)
+        from starlette.concurrency import run_in_threadpool
+        await run_in_threadpool(axhub_mail.remember_from_headers, dict(request.headers))   # 보관함 입출력이 이벤트 루프를 막지 않게
     except Exception:
         pass
     return await call_next(request)
@@ -60,8 +62,80 @@ def _refresh_directory(request, force: bool = False) -> str:
 
 
 def _mail_status(emails: list[str]) -> dict:
+    """메일 발송 상태 — 개수만(이메일 주소는 응답에 넣지 않는다)."""
     ids, missing = axhub_mail.resolve(emails)
-    return {"transport": axhub_mail.transport_name(), "resolved": len(ids), "unresolved": missing}
+    return {"transport": axhub_mail.transport_name(), "resolved": len(ids), "unresolved": len(missing)}
+
+
+# ── 알림설정 관리자 확인(서버측) ─────────────────────────────────────────────
+# 화면의 비밀번호 잠금만으로는 API 가 보호되지 않는다. 수신자 명단(직원 이메일)·설정 변경·테스트 발송은
+# 서버에서 확인한다: ① axhub 로그인 역할이 앱 소유자·회사 관리자(게이트가 넣는 X-AxHub-App-Role — 밖에서
+# 보낸 값은 게이트가 덮어씀) 이거나 ② 비밀번호 확인으로 받은 관리자 토큰(X-OOT-Admin, 8시간)이 있을 때.
+_ADMIN_ROLES = {"owner", "tenant_admin", "platform_admin"}
+_ADMIN_TTL = 8 * 3600
+_admin_tokens: dict[str, float] = {}
+_auth_fails: dict[str, list[float]] = {}
+_AUTH_WINDOW, _AUTH_MAX_FAILS = 600, 5          # 10분에 5번 틀리면 잠시 막음(대입 방지)
+
+
+def _is_admin(request) -> bool:
+    role = (request.headers.get("x-axhub-app-role") or "").strip().lower()
+    if role in _ADMIN_ROLES and axhub_mail.behind_gate():     # 로컬 실행에서는 머리말을 믿지 않는다
+        return True
+    tok = request.headers.get("x-oot-admin") or ""
+    exp = _admin_tokens.get(tok) if tok else None
+    if exp and exp > time.time():
+        return True
+    if exp:
+        _admin_tokens.pop(tok, None)
+    return False
+
+
+def _require_admin(request) -> None:
+    if not _is_admin(request):
+        raise HTTPException(403, "알림설정 관리자 확인이 필요합니다(알림설정에서 비밀번호를 입력하세요).")
+
+
+def _auth_key(request) -> str:
+    return (request.headers.get("x-axhub-user-id") or "").strip() or (request.client.host if request.client else "?")
+
+
+def _auth_blocked(key: str) -> bool:
+    now = time.time()
+    recent = [t for t in _auth_fails.get(key, []) if now - t < _AUTH_WINDOW]
+    _auth_fails[key] = recent
+    return len(recent) >= _AUTH_MAX_FAILS
+
+
+def _auth_failed(key: str) -> None:
+    _auth_fails.setdefault(key, []).append(time.time())
+
+
+def _issue_admin_token() -> str:
+    now = time.time()
+    for t, exp in list(_admin_tokens.items()):     # 만료분 정리
+        if exp <= now:
+            _admin_tokens.pop(t, None)
+    tok = secrets.token_urlsafe(32)
+    _admin_tokens[tok] = now + _ADMIN_TTL
+    return tok
+
+
+def _mask_email(e: str) -> str:
+    """k***@ekdp.com — 관리자가 아닌 사람에게 보이는 발송 이력의 수신자 표시."""
+    e = str(e or "").strip()
+    if "@" not in e:
+        return "***"
+    local, dom = e.split("@", 1)
+    return (local[:1] or "*") + "***@" + dom
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _mask_emails_in(text: str) -> str:
+    """글 안의 이메일을 모두 가린다(예전 로그·SMTP 오류 글에 남은 주소)."""
+    return _EMAIL_RE.sub(lambda m: _mask_email(m.group(0)), str(text or ""))
 
 
 # ── OOT ──────────────────────────────────────────────────────────────────────
@@ -316,23 +390,28 @@ def _schedule_label(s: dict) -> str:
 
 @app.get("/api/alarm/config")
 def api_alarm_get(request: Request):
-    _refresh_directory(request)                 # 10분에 한 번 — 수신자 사전 최신화
+    admin = _is_admin(request)
+    if admin:
+        _refresh_directory(request)             # 10분에 한 번 — 수신자 사전 최신화
     cfg = oot_mail.load_config()
     prefs = _load_prefs()
     sched = {**_DEFAULT_SCHEDULE, **(cfg.get("schedule") or {})}
     return {
         "policy": cfg.get("policy", "관리이탈만"),
-        "recipients": cfg.get("recipients", []),
+        "recipients": cfg.get("recipients", []) if admin else [],   # 직원 이메일은 관리자에게만
         # interval: 실제 알람 스케줄(oot_alert_config.json 의 schedule)을 표시용 문자열로
         "interval": _schedule_label(sched),
         "schedule": sched,
         "night": prefs.get("night", True),
         "mail": _mail_status(_all_group_emails()),
+        "isAdmin": admin,                                  # 소유자·회사 관리자 역할이면 비밀번호 없이 진입
+        "passwordSet": oot_mail.password_is_set(cfg),
     }
 
 
 @app.post("/api/alarm/config")
-def api_alarm_set(body: AlarmConfig):
+def api_alarm_set(body: AlarmConfig, request: Request):
+    _require_admin(request)
     # 정책만 oot_alert_config.json 에 저장. 수신자(recipients/recipient_groups)는
     # /api/recipients/groups 가 관리하므로 여기서 건드리지 않는다.
     cfg = oot_mail.load_config()
@@ -376,9 +455,11 @@ def _classify_alarm_line(msg: str) -> tuple[str, str, int]:
 
 
 @app.get("/api/alarm/history")
-def api_alarm_history(days: int = Query(30, ge=0, le=3650), limit: int = Query(3000, ge=100, le=20000)):
+def api_alarm_history(request: Request, days: int = Query(30, ge=0, le=3650),
+                      limit: int = Query(3000, ge=100, le=20000)):
     """알림설정 화면 이력 패널용 — 메일 발송 이력(oot_alarm_sent.csv) + 알람 실행 로그(oot_alarm.log).
-    days=0 이면 전체 기간. 로그는 최신순 limit 줄까지."""
+    days=0 이면 전체 기간. 로그는 최신순 limit 줄까지. 관리자가 아니면 수신자 이메일을 가린다."""
+    admin = _is_admin(request)
     import csv as _csv
     import re
     from datetime import datetime as _dt, timedelta as _td
@@ -398,7 +479,8 @@ def api_alarm_history(days: int = Query(30, ge=0, le=3650), limit: int = Query(3
                 "product": r.get("품목", ""), "code": r.get("품목코드", ""), "lot": r.get("제조번호", ""),
                 "item": r.get("시험항목", ""), "value": r.get("결과값", ""), "mean": r.get("평균", ""),
                 "sd": r.get("표준편차", ""), "cls": r.get("분류", ""),
-                "recipients": [e.strip() for e in (r.get("수신자") or "").split(";") if e.strip()],
+                "recipients": [e if admin else _mask_email(e)          # 관리자가 아니면 가림
+                               for e in (x.strip() for x in (r.get("수신자") or "").split(";")) if e],
             })
     sent.sort(key=lambda x: x["time"], reverse=True)
 
@@ -426,7 +508,8 @@ def api_alarm_history(days: int = Query(30, ge=0, le=3650), limit: int = Query(3
             if not last_check and kind in ("detect", "check"):
                 last_check = t
             if len(events) < limit:
-                events.append({"time": t, "kind": kind, "testType": tt, "count": cnt, "text": msg})
+                events.append({"time": t, "kind": kind, "testType": tt, "count": cnt,
+                               "text": msg if admin else _mask_emails_in(msg)})
 
     tts = sorted({s["testType"] for s in sent if s["testType"]} | tts_log)
     return {"days": days, "sent": sent, "events": events, "eventsTotal": total,
@@ -444,23 +527,39 @@ class PwChange(BaseModel):
 
 
 @app.post("/api/alarm/auth")
-def api_alarm_auth(body: AuthBody):
-    """알림설정 진입 비밀번호 확인."""
-    return {"ok": oot_mail.check_password(body.password),
-            "fromEnv": oot_mail.password_from_env()}
+def api_alarm_auth(body: AuthBody, request: Request):
+    """알림설정 진입 비밀번호 확인 → 맞으면 관리자 토큰(8시간). 10분에 5번 틀리면 잠시 막는다."""
+    key = _auth_key(request)
+    if _auth_blocked(key):
+        raise HTTPException(429, "비밀번호를 여러 번 틀렸습니다. 10분 뒤 다시 시도하세요.")
+    if not oot_mail.password_is_set():
+        return {"ok": False, "fromEnv": False,
+                "msg": "비밀번호가 아직 정해지지 않았습니다. 앱 소유자가 알림설정에서 먼저 정해야 합니다."}
+    if not oot_mail.check_password(body.password):
+        _auth_failed(key)
+        return {"ok": False, "fromEnv": oot_mail.password_from_env()}
+    return {"ok": True, "fromEnv": oot_mail.password_from_env(), "token": _issue_admin_token()}
 
 
 @app.post("/api/alarm/password")
-def api_alarm_password(body: PwChange):
-    """비밀번호 변경 — 현재 비번 확인 후 config에 새 해시 저장."""
+def api_alarm_password(body: PwChange, request: Request):
+    """비밀번호 변경 — 관리자 확인 + 현재 비번 확인 후 config에 새 해시 저장."""
+    _require_admin(request)
     if oot_mail.password_from_env():
         return {"ok": False, "msg": "비밀번호가 .env(OOT_ALERT_PASSWORD)로 고정되어 화면 변경이 불가합니다."}
-    if not oot_mail.check_password(body.current):
+    key = _auth_key(request)
+    if _auth_blocked(key):
+        raise HTTPException(429, "비밀번호를 여러 번 틀렸습니다. 10분 뒤 다시 시도하세요.")
+    # 아직 정해지지 않았으면(예전 기본값 포함) 관리자가 현재 비밀번호 없이 새로 정한다.
+    if oot_mail.password_is_set() and not oot_mail.check_password(body.current):
+        _auth_failed(key)
         return {"ok": False, "msg": "현재 비밀번호가 일치하지 않습니다."}
-    if len(body.new.strip()) < 4:
-        return {"ok": False, "msg": "새 비밀번호는 4자 이상이어야 합니다."}
+    new = body.new.strip()
+    if len(new) < 8 or new.isdigit():
+        return {"ok": False, "msg": "새 비밀번호는 8자 이상, 숫자만으로 만들 수 없습니다."}
     cfg = oot_mail.load_config()
-    cfg["password_hash"] = oot_mail.hash_password(body.new.strip())
+    cfg["password_hash"] = oot_mail.hash_password(new)
+    _admin_tokens.clear()                     # 비밀번호가 바뀌면 이전에 발급한 토큰은 모두 무효
     oot_mail.save_config(cfg)
     return {"ok": True, "msg": "비밀번호가 변경되었습니다."}
 
@@ -480,7 +579,8 @@ def _all_group_emails() -> list[str]:
 
 @app.post("/api/alarm/test")
 def api_alarm_test(request: Request):
-    """테스트 메일 1건 발송(연동 확인) — 전 그룹 수신자 합집합으로."""
+    """테스트 메일 1건 발송(연동 확인) — 전 그룹 수신자 합집합으로. 관리자만."""
+    _require_admin(request)
     note = _refresh_directory(request, force=True) if axhub_mail.available() else ""
     to = _all_group_emails()
     if not to:
@@ -509,20 +609,23 @@ class GroupsBody(BaseModel):
 
 
 @app.get("/api/recipients")
-def api_recipients_list():
-    """수신자 마스터 DB(이름+이메일) 목록."""
+def api_recipients_list(request: Request):
+    """수신자 마스터 DB(이름+이메일) 목록. 관리자만."""
+    _require_admin(request)
     return {"recipients": recipients_db.load_db()}
 
 
 @app.post("/api/recipients")
-def api_recipients_add(body: RecipientBody):
+def api_recipients_add(body: RecipientBody, request: Request):
+    _require_admin(request)
     """수동 추가/갱신 → DB 병합."""
     ok, msg, db = recipients_db.add_recipient(body.name, body.email)
     return {"ok": ok, "msg": msg, "recipients": db}
 
 
 @app.post("/api/recipients/delete")
-def api_recipients_delete(body: EmailBody):
+def api_recipients_delete(body: EmailBody, request: Request):
+    _require_admin(request)
     """DB에서 제거. 제거된 이메일은 모든 시험종류 그룹에서도 제외."""
     db = recipients_db.remove_recipient(body.email)
     cfg = oot_mail.load_config()
@@ -548,8 +651,9 @@ def _union_of(groups: dict) -> list[str]:
 
 
 @app.get("/api/recipients/groups")
-def api_groups_get():
-    """시험종류별 수신 그룹 + 시험종류 목록 + 마스터 DB."""
+def api_groups_get(request: Request):
+    """시험종류별 수신 그룹 + 시험종류 목록 + 마스터 DB. 관리자만."""
+    _require_admin(request)
     cfg = oot_mail.load_config()
     return {"groups": cfg.get("recipient_groups") or {},
             "testTypes": core.oot_test_types(),
@@ -558,7 +662,8 @@ def api_groups_get():
 
 @app.post("/api/recipients/groups")
 def api_groups_set(body: GroupsBody, request: Request):
-    """시험종류별 그룹 저장 + recipients(합집합) 동기화."""
+    """시험종류별 그룹 저장 + recipients(합집합) 동기화. 관리자만."""
+    _require_admin(request)
     # DB에 존재하는 이메일만 허용(정합성)
     valid = {r["email"].strip().lower() for r in recipients_db.load_db()}
     clean = {}

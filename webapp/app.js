@@ -33,8 +33,12 @@ const STAB_TYPES_FALLBACK = ['시판후 안정성시험(Ongoing Stability)', '�
 let OOT_TEST_TYPES = ['완제품'];
 
 const $ = (sel, root = document) => root.querySelector(sel);
-async function getJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status); return r.json(); }
-async function postJSON(url, body) { const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); return r.json(); }
+// 알림설정 관리자 토큰(비밀번호 확인 뒤 서버가 발급, 8시간) — 수신자·설정 API 는 서버에서 확인한다.
+const adminHdr = () => (S && S.adminToken ? { 'X-OOT-Admin': S.adminToken } : {});
+// 관리자 토큰이 만료·무효(재배포·8시간·비밀번호 변경)면 잠금 화면으로 돌려보낸다.
+function adminExpired(r) { if (r && r.status === 403) { S.adminToken = ''; S.alarmAuthed = false; return true; } return false; }
+async function getJSON(url) { const r = await fetch(url, { headers: adminHdr() }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status); return r.json(); }
+async function postJSON(url, body) { const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...adminHdr() }, body: JSON.stringify(body) }); if (r.status === 403 || r.status === 429) { const j = await r.json().catch(() => ({})); return { ok: false, status: r.status, msg: j.detail || ('HTTP ' + r.status) }; } return r.json(); }
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function fmt(n, d) { if (n == null || isNaN(n)) return '—'; return Number(n).toLocaleString('ko-KR', { minimumFractionDigits: d, maximumFractionDigits: d }); }
 function sigStr(z) { if (z == null || isNaN(z)) return '—'; return (z >= 0 ? '+' : '−') + fmt(Math.abs(z), 2) + 'σ'; }
@@ -1358,7 +1362,7 @@ function histCsv() {
 }
 
 function alarmPage() {
-  if (!S.alarmAuthed) return alarmGate();
+  if (!S.alarmAuthed && !(S.alarm && S.alarm.isAdmin)) return alarmGate();   // 소유자·회사 관리자는 역할로 진입
   const al = S.alarm;
   const polCards = [['관리이탈만', '관리이탈만 (±3σ)', '±3σ 관리한계 이탈 시에만 발송'], ['주의+관리이탈', '주의 포함 (±2σ~)', '주의·관리이탈 모두 발송']].map(([k, t, d]) => {
     const sel = al.policy === k;
@@ -1754,7 +1758,7 @@ document.addEventListener('click', async e => {
   if (act === 'home') { goHome(); }
   else if (act === 'nav') { S.nav = el.dataset.nav; if (S.nav === 'alarm') S.alarmAuthed = false; render(); if (S.nav === 'stability') ensureStability(); if (S.nav === 'group') ensureGroup(); if (S.nav === 'alarm') loadAlarm(); if (S.nav === 'history') ensureHistory(); }
   else if (act === 'alarmUnlock') { unlockAlarm(); }
-  else if (act === 'alarmLock') { S.alarmAuthed = false; render(); }
+  else if (act === 'alarmLock') { S.alarmAuthed = false; S.adminToken = ''; render(); }
   else if (act === 'alarmTest') { testSend(); }
   else if (act === 'histTab') { S.histTab = el.dataset.tab; S.histLimit = 200; updateHistPanel(); }
   else if (act === 'histKind') { S.histKind = el.dataset.kind; S.histLimit = 200; updateHistPanel(); }
@@ -1897,6 +1901,7 @@ async function addDbRecip() {
   const m = $('#db-msg');
   try {
     const r = await postJSON('/api/recipients', { name, email });
+    if (adminExpired(r)) { render(); return; }
     if (r.ok) { S.recipDb = r.recipients || S.recipDb; render(); }
     else if (m) { m.textContent = r.msg || '추가 실패'; m.style.color = '#dc2626'; }
   } catch (err) { if (m) { m.textContent = '추가 실패: ' + err.message; m.style.color = '#dc2626'; } }
@@ -1904,6 +1909,7 @@ async function addDbRecip() {
 async function rmDbRecip(email) {
   try {
     const r = await postJSON('/api/recipients/delete', { email });
+    if (r.ok === false) { adminExpired(r); render(); alert(r.msg || '삭제 실패'); return; }
     S.recipDb = r.recipients || S.recipDb;
     const em = String(email).toLowerCase();
     for (const tt of Object.keys(S.groups)) S.groups[tt] = (S.groups[tt] || []).filter(x => String(x).toLowerCase() !== em);
@@ -1921,6 +1927,7 @@ function toggleMember(email) {
 async function saveGroups() {
   try {
     const r = await postJSON('/api/recipients/groups', { groups: S.groups });
+    if (r.ok === false) { adminExpired(r); render(); throw new Error(r.msg || '저장되지 않았습니다'); }
     S.groups = r.groups || S.groups; S.recipDirty = false; render();
     const s = $('#grp-status'); if (s) { s.textContent = '✓ 저장됨'; s.style.color = '#15803d'; }
   } catch (e) {
@@ -1930,6 +1937,7 @@ async function saveGroups() {
 async function saveAlarm() {
   try {
     const r = await postJSON('/api/alarm/config', S.alarm);
+    if (r && r.ok === false) { adminExpired(r); render(); throw new Error(r.msg || '저장되지 않았습니다'); }
     if (r && r.detail) throw new Error(typeof r.detail === 'string' ? r.detail : '입력값을 확인하세요');
     if (r && r.schedule) { S.alarm.schedule = r.schedule; S.alarm.interval = r.interval; }
     S.alarmDirty = false; render();
@@ -1942,8 +1950,8 @@ async function unlockAlarm() {
   const i = $('#alarm-pw'); if (!i) return;
   try {
     const r = await postJSON('/api/alarm/auth', { password: i.value });
-    if (r.ok) { S.alarmAuthed = true; S.alarmFromEnv = r.fromEnv; render(); }
-    else { const e = $('#alarm-pw-err'); if (e) e.textContent = '비밀번호가 일치하지 않습니다.'; i.value = ''; i.focus(); }
+    if (r.ok) { S.alarmAuthed = true; S.alarmFromEnv = r.fromEnv; S.adminToken = r.token || ''; render(); loadAlarm(); }
+    else { const e = $('#alarm-pw-err'); if (e) e.textContent = r.msg || '비밀번호가 일치하지 않습니다.'; i.value = ''; i.focus(); }
   } catch (e) { const el = $('#alarm-pw-err'); if (el) el.textContent = '확인 실패: ' + e.message; }
 }
 async function testSend() {

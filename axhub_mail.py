@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Optional
 
@@ -33,11 +34,31 @@ _TIMEOUT = 20
 
 _lock = threading.Lock()
 _dir_cache: Optional[dict] = None       # {email(소문자): {"id":..., "name":...}}
+_dir_at = 0.0                           # 사전을 마지막으로 읽은 시각 — 알람 프로세스도 1분마다 새로 읽는다
+_DIR_TTL = 60.0
 _members_at = 0.0                       # 마지막 멤버 목록 조회 시각(10분에 한 번)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """리디렉트를 따라가지 않는다 — Authorization(앱 토큰·사용자 로그인)이 다른 곳으로 새지 않게."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def api_url() -> str:
-    return (os.environ.get("AXHUB_API_URL") or "").rstrip("/")
+    """AXHUB_API_URL — https 일 때만 쓴다(토큰을 평문으로 보내지 않는다)."""
+    u = (os.environ.get("AXHUB_API_URL") or "").rstrip("/")
+    return u if u.startswith("https://") else ""
+
+
+def behind_gate() -> bool:
+    """axhub 게이트 뒤에서 도는가 — 그때만 X-AxHub-* 머리말을 믿는다(로컬 실행에서는 누구나 보낼 수 있다).
+    AXHUB_RELAY_SIGNING_SECRET 은 axhub 가 모든 앱에 항상 넣는 값이다."""
+    return bool(os.environ.get("AXHUB_RELAY_SIGNING_SECRET"))
 
 
 def available() -> bool:
@@ -50,42 +71,52 @@ def transport_name() -> str:
 
 
 # ── 사용자 사전(이메일 → 사용자 ID) ──────────────────────────────────────────────
-def _load() -> dict:
-    global _dir_cache
-    with _lock:
-        if _dir_cache is None:
-            try:
-                d = storage_io.read_json(DIRECTORY_PATH, default={}) or {}
-                _dir_cache = d if isinstance(d, dict) else {}
-            except Exception:
-                _dir_cache = {}
-        return _dir_cache
-
-
-def _save(d: dict) -> None:
+def _read_fresh() -> Optional[dict]:
+    """보관함에서 새로 읽는다. 읽기 오류면 None(이때는 캐시도 저장도 하지 않는다)."""
     try:
-        storage_io.write_json(DIRECTORY_PATH, d)
+        d = storage_io.read_json_strict(DIRECTORY_PATH, default={}) or {}
+        return d if isinstance(d, dict) else {}
     except Exception:
-        pass
+        return None
+
+
+def _load() -> dict:
+    """사전(1분 캐시). 읽기 오류면 직전 캐시를 그대로(없으면 빈 사전) 쓰되 캐시를 덮지 않는다."""
+    global _dir_cache, _dir_at
+    with _lock:
+        if _dir_cache is not None and time.time() - _dir_at < _DIR_TTL:
+            return _dir_cache
+    fresh = _read_fresh()
+    with _lock:
+        if fresh is not None:
+            _dir_cache, _dir_at = fresh, time.time()
+        return _dir_cache if _dir_cache is not None else {}
 
 
 def _put(entries: list[tuple[str, str, str]]) -> int:
-    """(email, user_id, name) 들을 사전에 넣는다. 바뀐 게 있을 때만 저장. 바뀐 수 반환."""
-    d = _load()
+    """(email, user_id, name) 들을 사전에 넣는다. 저장 직전에 보관함을 새로 읽어 병합하고,
+    읽기 오류면 저장하지 않는다(한 번의 오류로 사전 전체가 지워지지 않게). 바뀐 수 반환."""
+    global _dir_cache, _dir_at
+    base = _read_fresh()
+    if base is None:
+        return 0
     changed = 0
+    for email, uid, name in entries:
+        e = str(email or "").strip().lower()
+        u = str(uid or "").strip()
+        if not e or not u or "@" not in e:
+            continue
+        cur = base.get(e) or {}
+        if cur.get("id") != u or (name and cur.get("name") != name):
+            base[e] = {"id": u, "name": name or cur.get("name", "")}
+            changed += 1
+    if changed:
+        try:
+            storage_io.write_json(DIRECTORY_PATH, base)
+        except Exception:
+            return 0
     with _lock:
-        for email, uid, name in entries:
-            e = str(email or "").strip().lower()
-            u = str(uid or "").strip()
-            if not e or not u or "@" not in e:
-                continue
-            cur = d.get(e) or {}
-            if cur.get("id") != u or (name and cur.get("name") != name):
-                d[e] = {"id": u, "name": name or cur.get("name", "")}
-                changed += 1
-        snap = dict(d) if changed else None
-    if snap is not None:
-        _save(snap)
+        _dir_cache, _dir_at = base, time.time()
     return changed
 
 
@@ -100,6 +131,8 @@ def _b64(v: str) -> str:
 
 def remember_from_headers(headers) -> None:
     """요청 머리말(SSO)에서 본인 이메일·사용자 ID 를 사전에 넣는다. 이미 같으면 아무것도 안 한다."""
+    if not behind_gate():
+        return
     uid = (headers.get("x-axhub-user-id") or "").strip()
     email = _b64(headers.get("x-axhub-user-email") or "").strip().lower()
     if not uid or not email:
@@ -112,7 +145,7 @@ def remember_from_headers(headers) -> None:
 
 def _get_json(url: str, token: str) -> dict:
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+    with _opener.open(req, timeout=_TIMEOUT) as r:
         return json.loads(r.read().decode("utf-8") or "{}")
 
 
@@ -126,7 +159,9 @@ def refresh_from_members(user_token: str, force: bool = False) -> tuple[int, str
     entries, cursor, pages = [], "", 0
     try:
         while pages < 20:
-            url = f"{api_url()}/api/v1/apps/{APP_ID}/members?limit=100" + (f"&cursor={cursor}" if cursor else "")
+            q = {"limit": 100, **({"cursor": cursor} if cursor else {})}
+            url = (f"{api_url()}/api/v1/apps/{urllib.parse.quote(APP_ID, safe='')}/members?"
+                   + urllib.parse.urlencode(q))
             body = _get_json(url, user_token)
             body = body.get("data", body) if isinstance(body, dict) else {}
             for it in body.get("items") or []:
@@ -177,7 +212,7 @@ def send_mail(user_ids: list[str], subject: str, html: str) -> tuple[bool, str]:
             headers={"Authorization": f"Bearer {os.environ['AXHUB_APP_TOKEN']}",
                      "Content-Type": "application/json", "Accept": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+            with _opener.open(req, timeout=_TIMEOUT) as r:
                 body = json.loads(r.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as e:
             reason = {400: "요청 형식 오류", 401: "앱 토큰 거절", 404: "받을 수 있는 사람이 없음(회사 활성 멤버 아님)",

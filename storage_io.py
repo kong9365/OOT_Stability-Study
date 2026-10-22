@@ -65,6 +65,38 @@ def exists(path) -> bool:
     return os.path.exists(path)
 
 
+class StorageReadError(Exception):
+    """보관함 읽기 실패(파일 없음이 아님) — 이때 빈 값으로 보고 덮어쓰면 자료가 지워진다."""
+
+
+def read_text_strict(path, encoding: str = "utf-8") -> str | None:
+    """없으면 None, 읽기 오류면 StorageReadError. 읽은 뒤 덮어쓰는(병합 저장) 곳에서 쓴다."""
+    if _s3:
+        try:
+            obj = _s3.get_object(Bucket=_BUCKET, Key=_key(path))
+            return obj["Body"].read().decode(encoding)
+        except Exception as e:  # noqa: BLE001
+            code = str(getattr(e, "response", {}).get("Error", {}).get("Code", ""))
+            if code in ("NoSuchKey", "404", "NotFound"):
+                return None
+            raise StorageReadError(type(e).__name__) from None
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding=encoding) as f:
+        return f.read()
+
+
+def read_json_strict(path, default=None):
+    """없으면 default, 읽기 오류면 StorageReadError, 깨진 JSON 도 StorageReadError."""
+    text = read_text_strict(path)
+    if text is None:
+        return default
+    try:
+        return json.loads(text)
+    except Exception:
+        raise StorageReadError("JSON") from None
+
+
 def read_text(path, encoding: str = "utf-8") -> str | None:
     """없으면 None(기존 os.path.exists 가드 패턴과 동일하게 사용)."""
     if _s3:
