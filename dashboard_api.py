@@ -53,6 +53,23 @@ async def _remember_user(request, call_next):
     return await call_next(request)
 
 
+_URL_RE = re.compile(r"https?://\S+")        # 서명 주소 등 — 로그·응답에 남기지 않는다
+
+
+@app.exception_handler(storage_io.StorageReadError)
+async def _storage_read_error(request, exc):
+    """보관함을 읽지 못하면 저장·발송을 멈추고 503 — 빈 값으로 보고 덮어쓰지 않는다."""
+    return JSONResponse({"detail": "보관함을 읽지 못했습니다. 잠시 뒤 다시 시도하세요(저장하지 않았습니다)."},
+                        status_code=503)
+
+
+def _fail(e: Exception, msg: str):
+    """502 — 응답에는 일반 문구만, 자세한 까닭은 서버 로그에(주소는 가림). 내부 SQL·표 이름이 새지 않게."""
+    detail = _URL_RE.sub("[주소 생략]", str(e))[:500]
+    print(f"[오류] {msg}: {type(e).__name__}: {detail}", flush=True)
+    raise HTTPException(502, f"{msg}. 잠시 뒤 다시 시도하고, 계속되면 관리자에게 알려 주세요.")
+
+
 def _refresh_directory(request, force: bool = False) -> str:
     """알림설정 화면을 연 관리자의 로그인으로 앱 멤버 목록을 읽어 수신자 사전을 채운다."""
     try:
@@ -145,7 +162,7 @@ def api_oot_products(test_type: str = Query("완제품")):
         return {"testType": test_type, "testTypes": core.oot_test_types(),
                 "products": core.oot_products(test_type)}
     except Exception as e:
-        raise HTTPException(502, f"품목 목록 로드 실패: {e}")
+        _fail(e, "품목 목록 로드 실패")
 
 
 @app.get("/api/oot/lots")
@@ -153,7 +170,7 @@ def api_oot_lots(code: str, test_type: str = Query("완제품"), year: Optional[
     try:
         return core.oot_lot_summary(code, test_type, year=year)
     except Exception as e:
-        raise HTTPException(502, f"LOT 데이터 로드 실패: {e}")
+        _fail(e, "LOT 데이터 로드 실패")
 
 
 @app.get("/api/oot/excel")
@@ -164,7 +181,7 @@ def api_oot_excel(code: str, test_type: str = Query("완제품"), year: Optional
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
-        raise HTTPException(502, f"Excel 생성 실패: {e}")
+        _fail(e, "Excel 생성 실패")
     from fastapi import Response
     ytag = f"_{year}" if (year and year != "전체") else ""
     fn = f"OOT_리포트_{code}{ytag}.xlsx"
@@ -181,7 +198,7 @@ def api_stab_products(test_type: str = Query("시판후 안정성시험(Ongoing 
         return {"testType": test_type, "testTypes": core.stab_test_types(),
                 "products": core.oot_products(test_type)}
     except Exception as e:
-        raise HTTPException(502, f"품목 목록 로드 실패: {e}")
+        _fail(e, "품목 목록 로드 실패")
 
 
 @app.get("/api/stability")
@@ -193,7 +210,7 @@ def api_stability(code: str,
     try:
         return core.stability_analysis(code, test_type, spec_low, spec_high, method, test_item, batch)
     except Exception as e:
-        raise HTTPException(502, f"안정성 분석 실패: {e}")
+        _fail(e, "안정성 분석 실패")
 
 
 @app.get("/api/stability/tables")
@@ -205,7 +222,7 @@ def api_stability_tables(code: str,
     try:
         return core.stability_tables(code, test_type, spec_low, spec_high, batch)
     except Exception as e:
-        raise HTTPException(502, f"표 생성 실패: {e}")
+        _fail(e, "표 생성 실패")
 
 
 @app.get("/api/stability/excel")
@@ -217,7 +234,7 @@ def api_stability_excel(code: str,
     try:
         data = core.stability_excel(code, test_type, spec_low, spec_high, batch)
     except Exception as e:
-        raise HTTPException(502, f"Excel 생성 실패: {e}")
+        _fail(e, "Excel 생성 실패")
     from fastapi import Response
     fn = f"안정성_분석결과_{code}.xlsx"
     quoted = urllib.parse.quote(fn)
@@ -266,7 +283,7 @@ def api_group_items(test_type: str = Query("완제품"), q: str = Query(""),
             out["years"] = core.group_years(code_list, test_type)
         return out
     except Exception as e:
-        raise HTTPException(502, f"품목 목록 로드 실패: {e}")
+        _fail(e, "품목 목록 로드 실패")
 
 
 @app.get("/api/group/list")
@@ -276,22 +293,31 @@ def api_group_list():
 
 
 @app.post("/api/group")
-def api_group_save(body: GroupSaveBody):
-    """동일품목군 저장."""
+def api_group_save(body: GroupSaveBody, request: Request):
+    """동일품목군 저장 — 새로 만들기는 누구나, 기존 품목군 덮어쓰기는 관리자만."""
     gid = (body.group_id or body.group_name or "").strip()
     if not gid:
         raise HTTPException(400, "그룹 이름(또는 ID)이 필요합니다.")
+    if len(gid) > 100 or len((body.group_name or "").strip()) > 100:
+        raise HTTPException(400, "그룹 이름은 100자 이하여야 합니다.")
     codes = [str(c).strip() for c in body.member_codes if str(c).strip()]
     if not codes:
         raise HTTPException(400, "구성 품목코드가 필요합니다.")
+    if len(codes) > 200 or any(len(c) > 30 for c in codes):
+        raise HTTPException(400, "구성 품목코드는 200개 이하, 코드당 30자 이하여야 합니다.")
+    if _GROUPS.load_group(gid) is not None:
+        _require_admin(request)          # 남이 만든 품목군의 구성을 바꾸지 못하게
+    elif len(_GROUPS.list_groups()) >= 500:
+        raise HTTPException(400, "품목군은 500개까지 만들 수 있습니다.")
     g = _GROUPS.save_group(gid, (body.group_name or gid).strip(), codes)
     return {"ok": True, "group": _group_dict(g),
             "groups": [_group_dict(x) for x in _GROUPS.list_groups()]}
 
 
 @app.post("/api/group/delete")
-def api_group_delete(body: GroupIdBody):
-    """동일품목군 삭제."""
+def api_group_delete(body: GroupIdBody, request: Request):
+    """동일품목군 삭제 — 관리자만(저장은 누구나)."""
+    _require_admin(request)
     ok = _GROUPS.delete_group((body.group_id or "").strip())
     return {"ok": ok, "groups": [_group_dict(g) for g in _GROUPS.list_groups()]}
 
@@ -310,7 +336,7 @@ def api_group_pooled(body: GroupPooledBody):
     except ValueError as e:
         raise HTTPException(400, str(e))          # 유효 레코드 <2건 등
     except Exception as e:
-        raise HTTPException(502, f"풀링 집계 실패: {e}")
+        _fail(e, "풀링 집계 실패")
 
 
 @app.post("/api/group/pooled_all")
@@ -322,7 +348,7 @@ def api_group_pooled_all(body: GroupPooledBody):
     try:
         return core.group_pooled_all(codes, body.test_type, year=(body.year or None))
     except Exception as e:
-        raise HTTPException(502, f"풀링 집계 실패: {e}")
+        _fail(e, "풀링 집계 실패")
 
 
 @app.get("/api/group/excel")
@@ -337,7 +363,7 @@ def api_group_excel(codes: str = Query(""), test_type: str = Query("완제품"),
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
-        raise HTTPException(502, f"Excel 생성 실패: {e}")
+        _fail(e, "Excel 생성 실패")
     from fastapi import Response
     ytag = f"_{year}" if (year and year != "전체") else ""
     fn = f"APQR_리포트{ytag}.xlsx"
@@ -414,7 +440,7 @@ def api_alarm_set(body: AlarmConfig, request: Request):
     _require_admin(request)
     # 정책만 oot_alert_config.json 에 저장. 수신자(recipients/recipient_groups)는
     # /api/recipients/groups 가 관리하므로 여기서 건드리지 않는다.
-    cfg = oot_mail.load_config()
+    cfg = oot_mail.load_config(strict=True)
     cfg["policy"] = body.policy
     # 실행 스케줄은 알람(oot_alarm.py)이 읽는 oot_alert_config.json 의 schedule 에 저장
     if body.schedule is not None:
@@ -509,7 +535,8 @@ def api_alarm_history(request: Request, days: int = Query(30, ge=0, le=3650),
                 last_check = t
             if len(events) < limit:
                 events.append({"time": t, "kind": kind, "testType": tt, "count": cnt,
-                               "text": msg if admin else _mask_emails_in(msg)})
+                               "text": _URL_RE.sub("[주소 생략]",
+                                                   msg if admin else _mask_emails_in(msg))})
 
     tts = sorted({s["testType"] for s in sent if s["testType"]} | tts_log)
     return {"days": days, "sent": sent, "events": events, "eventsTotal": total,
@@ -557,7 +584,7 @@ def api_alarm_password(body: PwChange, request: Request):
     new = body.new.strip()
     if len(new) < 8 or new.isdigit():
         return {"ok": False, "msg": "새 비밀번호는 8자 이상, 숫자만으로 만들 수 없습니다."}
-    cfg = oot_mail.load_config()
+    cfg = oot_mail.load_config(strict=True)
     cfg["password_hash"] = oot_mail.hash_password(new)
     _admin_tokens.clear()                     # 비밀번호가 바뀌면 이전에 발급한 토큰은 모두 무효
     oot_mail.save_config(cfg)
@@ -628,7 +655,7 @@ def api_recipients_delete(body: EmailBody, request: Request):
     _require_admin(request)
     """DB에서 제거. 제거된 이메일은 모든 시험종류 그룹에서도 제외."""
     db = recipients_db.remove_recipient(body.email)
-    cfg = oot_mail.load_config()
+    cfg = oot_mail.load_config(strict=True)
     groups = cfg.get("recipient_groups") or {}
     em = str(body.email).strip().lower()
     for tt in list(groups.keys()):
@@ -671,7 +698,7 @@ def api_groups_set(body: GroupsBody, request: Request):
         kept = [str(e).strip() for e in (emails or []) if str(e).strip().lower() in valid]
         if kept:
             clean[tt] = kept
-    cfg = oot_mail.load_config()
+    cfg = oot_mail.load_config(strict=True)
     cfg["recipient_groups"] = clean
     cfg["recipients"] = _union_of(clean)
     oot_mail.save_config(cfg)
@@ -736,8 +763,25 @@ def _startup_export_schedule():
         threading.Thread(target=oot_export.scheduler_loop, daemon=True).start()
 
 
+_STARTED = time.time()
+_ALARM_STALE_SEC = 10 * 60      # 알람 프로세스의 별도 스레드가 30초마다 표시 — 10분 끊기면 프로세스가 죽은 것
+_ALARM_GRACE_SEC = 180          # 기동 직후 유예
+
+
 @app.get("/api/health")
 def api_health():
+    """웹 + 알람 생존. 알람 표시가 있는데 10분 넘게 갱신이 없으면 503 → 플랫폼이 컨테이너를 다시 띄운다.
+    알람을 일부러 끈 환경(OOT_ALARM_OFF=1, 스테이징)·기동 직후·표시 파일이 아예 없는 경우(임시 폴더 쓰기 실패 등)는
+    판단하지 않는다 — 알람 문제로 웹까지 재시작이 반복되지 않게."""
+    if os.environ.get("OOT_ALARM_OFF", "").strip() != "1" and time.time() - _STARTED > _ALARM_GRACE_SEC:
+        hb = os.path.join(os.environ.get("TMPDIR", "/tmp"), "oot_alarm_heartbeat")
+        try:
+            age = time.time() - float(open(hb, encoding="utf-8").read().strip() or 0)
+        except Exception:
+            age = None                   # 파일 없음·읽기 실패 → 판단 안 함
+        if age is not None and age > _ALARM_STALE_SEC:
+            return JSONResponse({"ok": False, "service": "kwangdong-dashboard",
+                                 "alarm": "정지 또는 응답 없음"}, status_code=503)
     return {"ok": True, "service": "kwangdong-dashboard"}
 
 

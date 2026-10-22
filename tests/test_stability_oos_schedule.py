@@ -192,7 +192,7 @@ def test_population_includes_unapproved_by_default(monkeypatch):
                 oot_export.ROWS_SQL, oot_export.COUNT_SQL):
         assert "ORDER_STATUS" not in sql
     seen = []
-    monkeypatch.setattr(dbx, "query", lambda sql, params=None, large=False: seen.append(sql) or [])
+    monkeypatch.setattr(dbx, "query_iter", lambda sql, params=None: iter(seen.append(sql) or []))
     kdp_core.fetch_oot_rows_for_types([F.TT_FIN])
     assert seen and "ORDER_STATUS" not in seen[0]
 

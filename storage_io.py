@@ -122,7 +122,7 @@ def write_text(path, content: str, encoding: str = "utf-8") -> None:
 
 def append_text(path, content: str, encoding: str = "utf-8") -> None:
     """작은 로그/CSV용 — 기존 내용을 읽어 이어붙여 다시 쓴다(S3는 네이티브 append가 없음)."""
-    prev = read_text(path, encoding=encoding) or ""
+    prev = read_text_strict(path, encoding=encoding) or ""   # 읽기 오류면 예외 — 기존 내용을 잘라 덮지 않는다
     write_text(path, prev + content, encoding=encoding)
 
 
@@ -189,8 +189,11 @@ def export_read(name: str) -> bytes | None:
     if _export_ready(name) == "s3":
         try:
             return _s3.get_object(Bucket=_BUCKET, Key=_EXPORT_PREFIX + name)["Body"].read()
-        except Exception:
-            return None
+        except Exception as e:  # noqa: BLE001
+            code = str(getattr(e, "response", {}).get("Error", {}).get("Code", ""))
+            if code in ("NoSuchKey", "404", "NotFound"):
+                return None
+            raise StorageReadError(type(e).__name__) from None   # 읽기 오류 — 빈 상태로 덮어쓰지 않게
     path = os.path.join(_EXPORT_DIR, name)
     if not os.path.exists(path):
         return None

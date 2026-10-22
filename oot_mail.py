@@ -7,6 +7,7 @@ oot_alert_config.json 으로 관리(없으면 QMS_* 환경변수 폴백).
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import smtplib
@@ -92,9 +93,12 @@ def password_from_env() -> bool:
     return bool(os.environ.get("OOT_ALERT_PASSWORD", "").strip())
 
 
-def load_config() -> dict[str, Any]:
+def load_config(strict: bool = False) -> dict[str, Any]:
+    """설정. strict=True 면 보관함 읽기 오류를 예외로 낸다(알람이 '수신 그룹 없음'으로 오판하지 않게)."""
     cfg = dict(DEFAULT_CONFIG)
-    cfg.update(storage_io.read_json(CONFIG_PATH, default={}) or {})
+    stored = (storage_io.read_json_strict(CONFIG_PATH, default={}) if strict
+              else storage_io.read_json(CONFIG_PATH, default={}))
+    cfg.update(stored or {})
     # 환경변수 폴백
     if not cfg.get("recipients"):
         env_to = os.environ.get("QMS_ALERT_TO", "")
@@ -177,6 +181,11 @@ def log_sent(records: list[dict], to_addrs: list[str]) -> None:
     storage_io.append_text(SENT_LOG_PATH, buf.getvalue(), encoding="utf-8-sig")
 
 
+def _h(x) -> str:
+    """메일 HTML 에 넣는 LIMS 값 — 이스케이프(품목명 등에 < & 가 있어도 안전하게)."""
+    return html.escape("" if x is None else str(x))
+
+
 def build_oot_email_html(records: list[dict], dashboard_url: str = "") -> str:
     """신규 OOT 행 목록 → HTML 메일 본문. 시험종류 맨 앞, 알림ID(추적용) 맨 뒤."""
     now = kst.now().strftime("%Y-%m-%d %H:%M")
@@ -189,15 +198,15 @@ def build_oot_email_html(records: list[dict], dashboard_url: str = "") -> str:
         aid = alert_id(r)
         rows += f"""
         <tr style="background:{bg}">
-          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-weight:700">{r.get('시험종류','-')}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #eee">{r.get('품목','-')}<br>
-              <span style="font:11px monospace;color:#888">{r.get('품목코드','')}</span></td>
-          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-family:monospace">{r.get('제조번호','-')}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #eee">{r.get('시험항목','-')}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-family:monospace;font-weight:700;color:{color}">{r.get('결과값','-')}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-family:monospace;color:#555">μ {r.get('평균','-')} / σ {r.get('표준편차','-')}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #eee;color:{color};font-weight:600">{st}</td>
-          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-family:monospace;color:#888">{aid}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-weight:700">{_h(r.get('시험종류','-'))}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee">{_h(r.get('품목','-'))}<br>
+              <span style="font:11px monospace;color:#888">{_h(r.get('품목코드',''))}</span></td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-family:monospace">{_h(r.get('제조번호','-'))}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee">{_h(r.get('시험항목','-'))}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-family:monospace;font-weight:700;color:{color}">{_h(r.get('결과값','-'))}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-family:monospace;color:#555">μ {_h(r.get('평균','-'))} / σ {_h(r.get('표준편차','-'))}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;color:{color};font-weight:600">{_h(st)}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #eee;font-family:monospace;color:#888">{_h(aid)}</td>
         </tr>"""
     links = ""
     if dashboard_url:
@@ -240,9 +249,9 @@ def build_oot_email_html_compact(records: list[dict], dashboard_url: str = "",
     items: list[str] = []
     for r in records:
         st = str(r.get("분류", ""))
-        items.append(f"<li>[{r.get('시험종류', '-')}] {r.get('품목', '-')}({r.get('품목코드', '')}) "
-                     f"{r.get('제조번호', '-')} · {r.get('시험항목', '-')} = <b>{r.get('결과값', '-')}</b> "
-                     f"(μ {r.get('평균', '-')} / σ {r.get('표준편차', '-')}) {st} · {alert_id(r)}</li>")
+        items.append(f"<li>[{_h(r.get('시험종류', '-'))}] {_h(r.get('품목', '-'))}({_h(r.get('품목코드', ''))}) "
+                     f"{_h(r.get('제조번호', '-'))} · {_h(r.get('시험항목', '-'))} = <b>{_h(r.get('결과값', '-'))}</b> "
+                     f"(μ {_h(r.get('평균', '-'))} / σ {_h(r.get('표준편차', '-'))}) {_h(st)} · {alert_id(r)}</li>")
     body = items
     while True:
         rest = len(records) - len(body)

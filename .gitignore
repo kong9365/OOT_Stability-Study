@@ -27,3 +27,10 @@ sample_OOT_report.xlsx
 
 # === OOT 넘김 파일(실데이터 판정 자료) ===
 oot_export_*
+
+# 개인정보 명부·포털 진단 저장물·시험 찌꺼기(공개 저장소에 올리지 않는다)
+QMS_메일수신자_명부_*.md
+network_gate_diag/
+.pytest_cache/
+parsed_data.csv
+.kdp_data_cache.pkl.gz.tmp

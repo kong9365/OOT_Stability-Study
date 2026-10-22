@@ -220,8 +220,12 @@ def _line(r, tt: str, excluded: bool) -> dict:
         out.update(blank, is_quant="Y" if quant else "N", in_calc="N", sd_floored="N",
                    status=("데이터부족" if quant else "정성"), status_decided=("데이터부족" if quant else ""))
         return out
-    z = (v - mu) / sd if (sd > 0 and not math.isnan(mu)) else float("nan")
-    zr = (v - mu) / sdr if (sdr > 0 and not math.isnan(mu)) else float("nan")
+    loq = r.get("_loq")
+    loq = None if (loq is None or loq != loq) else float(loq)
+    cens = str(r.get("값해석") or "") in core.rp.CENSORED_KINDS
+    # 판정 z(화면과 같음): 불검출·정량한계 미만은 이탈 아님, OOT 상한 = max(μ+kσ, LOQ)
+    z = core.rp.judge_z((v - mu) / sd if (sd > 0 and not math.isnan(mu)) else float("nan"), v, loq, cens)
+    zr = core.rp.judge_z((v - mu) / sdr if (sdr > 0 and not math.isnan(mu)) else float("nan"), v, loq, cens)
     if math.isnan(zr):
         decided = "데이터부족"
     else:
@@ -245,6 +249,7 @@ def lines_for(rows: list[dict], tt: str) -> list[dict]:
     for code in sorted(by_code):
         text = core._rows_to_csv(by_code[code], core._FULL_FIELDS)
         pdf = pd.DataFrame(list(csv.DictReader(io.StringIO(text))))
+        pdf = core.apply_d4(pdf, tt)               # 화면과 같은 D-4(원문 해석 값까지 본다)
         kept, dropped = core.split_excluded(pdf)
         judged, _info = core.judge_rows(kept, None)
         out += [_line(r, tt, False) for _, r in judged.iterrows()]

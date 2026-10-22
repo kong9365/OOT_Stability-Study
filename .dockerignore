@@ -34,3 +34,14 @@ offline_dbx.py
 *.bat
 *.vbs
 *.ps1
+
+# === 2026-10-22 정리: 문서·로컬 PC 전용·개인정보 명부·시험 찌꺼기는 이미지에 넣지 않는다 ===
+*.md
+실행명령어.txt
+network_gate.py
+network_gate_diag/
+run_server_wmisafe.py
+.pytest_cache/
+parsed_data.csv
+.kdp_data_cache.pkl.gz.tmp
+pyproject.toml

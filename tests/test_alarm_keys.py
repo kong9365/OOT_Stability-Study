@@ -51,7 +51,7 @@ def alarm(tmp_path, monkeypatch):
         monkeypatch.setattr(mod, "STATE_PATH", state)
         monkeypatch.setattr(mod, "LOG_PATH", str(tmp_path / "oot_alarm.log"))
         monkeypatch.setattr(mod, "_ensure_internet_before_send", lambda: True)
-    monkeypatch.setattr(oot_mail, "load_config", lambda: {
+    monkeypatch.setattr(oot_mail, "load_config", lambda **kw: {
         "enabled": True, "policy": "관리이탈·주의",
         "recipient_groups": {F.TT_FIN: ["qa@example.invalid"], F.TT_LT: ["qa@example.invalid"]}})
     monkeypatch.setattr(oot_mail, "send_oot_alert", lambda recs, **kw: (sent.append(recs), (True, "ok"))[1])
@@ -145,3 +145,16 @@ def test_off_switch_needs_exactly_one(monkeypatch):
         monkeypatch.setattr(oot_alarm, "check_once", lambda: ran.append(1))
         oot_alarm.main()
         assert ran == [1], v
+
+
+def test_parse_upgrade_baselines_once_without_mail(alarm):
+    """값 해석 확장 뒤 첫 실행: 새로 읽힌 과거 건은 보내지 않고 기준선으로만. 그다음부터 신규분만."""
+    import storage_io
+    a = alarm
+    assert a["run"](a["new"], [A]) == []                      # 첫 실행 = 기준선(+표지 둘)
+    ks = a["keys"]() - {"#parse-v1"}                          # 해석 확장 전 상태로 되돌림
+    storage_io.write_json(a["new"].STATE_PATH, sorted(ks))
+    assert a["run"](a["new"], [A, D]) == []                   # D 는 '새로 읽힌 과거 건' — 안 보냄
+    assert "#parse-v1" in a["keys"]()
+    H = cand(F.TT_FIN, "23020", "함량", "성분다", CRIT)
+    assert a["run"](a["new"], [A, D, H]) == [("23020", "함량", "성분다")]

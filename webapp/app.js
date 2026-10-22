@@ -37,8 +37,8 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const adminHdr = () => (S && S.adminToken ? { 'X-OOT-Admin': S.adminToken } : {});
 // 관리자 토큰이 만료·무효(재배포·8시간·비밀번호 변경)면 잠금 화면으로 돌려보낸다.
 function adminExpired(r) { if (r && r.status === 403) { S.adminToken = ''; S.alarmAuthed = false; return true; } return false; }
-async function getJSON(url) { const r = await fetch(url, { headers: adminHdr() }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status); return r.json(); }
-async function postJSON(url, body) { const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...adminHdr() }, body: JSON.stringify(body) }); if (r.status === 403 || r.status === 429) { const j = await r.json().catch(() => ({})); return { ok: false, status: r.status, msg: j.detail || ('HTTP ' + r.status) }; } return r.json(); }
+async function getJSON(url) { const r = await fetch(url, { headers: adminHdr() }); if (r.status === 403 && S.adminToken) { S.adminToken = ''; S.alarmAuthed = false; } if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status); return r.json(); }
+async function postJSON(url, body) { const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...adminHdr() }, body: JSON.stringify(body) }); if (!r.ok) { const j = await r.json().catch(() => ({})); const d = j.detail; return { ok: false, status: r.status, msg: (typeof d === 'string' ? d : (d ? '입력값을 확인하세요' : 'HTTP ' + r.status)) }; } return r.json(); }
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function fmt(n, d) { if (n == null || isNaN(n)) return '—'; return Number(n).toLocaleString('ko-KR', { minimumFractionDigits: d, maximumFractionDigits: d }); }
 function sigStr(z) { if (z == null || isNaN(z)) return '—'; return (z >= 0 ? '+' : '−') + fmt(Math.abs(z), 2) + 'σ'; }
@@ -203,7 +203,30 @@ function excludedNote(lot) {
   const parts = [];
   if (ex['재시험 원값(잠정)']) parts.push(`재시험 원값 ${ex['재시험 원값(잠정)']}건 계산 제외(잠정 규칙: 적부 N/A 원시험 무효)`);
   if (ex['거짓 0']) parts.push(`거짓 0 ${ex['거짓 0']}건 제외(원문은 숫자인데 저장값만 0)`);
+  if (ex['2차 이상 단계(진입 이벤트로 관리)']) parts.push(`다단계 시험 2차 이상 결과 ${ex['2차 이상 단계(진입 이벤트로 관리)']}건은 값 계산에서 제외(1차 결과로 트렌딩, 2차 진입은 이벤트로 관리)`);
   return parts.length ? `<div style="font-size:11.5px;color:#9aa4b4;margin-top:6px;line-height:1.5">${parts.map(esc).join('<br>')}</div>` : '';
+}
+
+// 결과 원문을 어떻게 숫자로 읽었는지(서버 items[].valKind) — 순수 숫자는 꼬리표 없음.
+const VAL_KIND = { '숫자+단위': '단위 떼어 읽음', '불검출': '불검출→0', '정량한계미만': '정량한계 미만→0', '여러값평균': '여러 값 평균' };
+function kindTag(it) {
+  const t = VAL_KIND[it.valKind];
+  if (!t) return '';
+  const loq = it.loq != null ? ` · LOQ ${fmtVal(it.loq)}` : '';
+  return `<span title="LIMS 결과 원문을 숫자로 읽은 방식" style="margin-left:7px;font-size:10px;font-weight:600;padding:2px 7px;border-radius:999px;background:#eef2ff;color:#4338ca;white-space:nowrap">${esc(t + loq)}</span>`;
+}
+
+// 다단계 시험(용출 L1/L2/L3·S1~S3, 균일성·질량편차·붕해 1차/2차)의 2차 이상 진입 — 이벤트형 OOT.
+function stageEventsBox() {
+  const ev = (S.lotSummary && S.lotSummary.stageEvents) || [];
+  if (!ev.length) return '';
+  const rows = ev.map(e => `<div style="margin-top:4px"><b>${esc(e.family)}</b> — ${esc((e.rules || []).join(' · '))} <span style="font-family:${MONO};color:#7c2d12">(${(e.enteredLots || []).map(esc).join(', ')})</span></div>`).join('');
+  return `<div style="margin:13px 2px 0;background:#fff7ed;border:1px solid #fed7aa;border-radius:11px;padding:11px 15px;font-size:12.5px;color:#9a3412;line-height:1.55">
+    <b>다단계 시험 2차 이상 진입 이벤트(이벤트형 OOT)</b> — 전체 이력 기준 최근 10배치 중 2배치 이상, 또는 연속 2배치가 2차 이상으로 진입했습니다(연도 선택과 무관). 1차 결과 관리도와 별도로 원인을 확인하세요.${rows}</div>`;
+}
+function lotStageNote(lot) {
+  const fams = lot.stageEntered || [];
+  return fams.length ? `<div style="font-size:12px;color:#9a3412;margin-top:6px">이 로트는 2차 이상 시험에 진입: ${fams.map(esc).join(', ')}</div>` : '';
 }
 
 function normalItemsTable(lot) {
@@ -211,8 +234,8 @@ function normalItemsTable(lot) {
   if (!items.length) return '';
   const COLS = '2fr 1fr 1fr 1fr .9fr .8fr';
   const rows = items.map(it => `<div style="display:grid;grid-template-columns:${COLS};border-top:1px solid #f2f4f8">
-    <div style="padding:10px 14px;font-size:13px;font-weight:600;color:#27303f">${esc(it.name)}</div>
-    <div style="padding:10px 14px;text-align:right;font-family:${MONO};font-size:13px;color:#27303f">${fmt(it.val, 2)}</div>
+    <div style="padding:10px 14px;font-size:13px;font-weight:600;color:#27303f">${esc(it.name)}${kindTag(it)}</div>
+    <div style="padding:10px 14px;text-align:right;font-family:${MONO};font-size:13px;color:#27303f">${fmtVal(it.val)}</div>
     <div style="padding:10px 14px;text-align:right;font-family:${MONO};font-size:12.5px;color:#5b6573">${fmt(it.mean, it.mean != null && it.mean < 10 ? 3 : 1)}</div>
     <div style="padding:10px 14px;text-align:right;font-family:${MONO};font-size:12.5px;color:#5b6573">${fmt(it.sd, it.sd != null && it.sd < 10 ? 3 : 1)}</div>
     <div style="padding:10px 14px;text-align:right;font-family:${MONO};font-size:12.5px;font-weight:600;color:#16a34a">${sigStr(it.z)}</div>
@@ -223,7 +246,7 @@ function normalItemsTable(lot) {
       <div style="display:grid;grid-template-columns:${COLS};background:#f5f7fa;border-bottom:1px solid #e7ebf1;font-size:11px;font-weight:600;color:#8a94a6">
         <div style="padding:9px 14px">시험항목</div><div style="padding:9px 14px;text-align:right">결과값</div><div style="padding:9px 14px;text-align:right">평균 μ</div><div style="padding:9px 14px;text-align:right">표준편차 σ</div><div style="padding:9px 14px;text-align:right">σ편차</div><div style="padding:9px 14px">판정</div></div>
       ${rows}</div>
-    <div style="font-size:11px;color:#9aa4b4;margin-top:8px">σ편차 = (결과값 − μ) / σ · ±2σ 이내 정상 · 정성항목(미생물·확인·성상 등)은 σ 판정 대상이 아니어 제외</div></div>`;
+    <div style="font-size:11px;color:#9aa4b4;margin-top:8px">σ편차 = (결과값 − μ) / σ · ±2σ 이내 정상 · 정성항목(미생물·확인·성상 등)은 σ 판정 대상이 아니라서 제외(값이 모두 같아 σ=0 인 항목 포함)</div></div>`;
 }
 
 // σ가 판정에 쓸 수 있을 만큼 유효한지(0/부동소수점 잡음 방지). 아니면 null.
@@ -352,10 +375,10 @@ function ootResults() {
         : '주의 · ±2σ~±3σ';
     return `<div style="display:block;background:${C.bg};border:1px solid ${C.bd};border-radius:13px;padding:16px 17px">
       <div style="display:flex;align-items:center;gap:10px"><span style="width:10px;height:10px;border-radius:50%;flex:0 0 auto;background:${C.dot}"></span>
-        <span style="font-size:15px;font-weight:600">${esc(it.name)}</span>
+        <span style="font-size:15px;font-weight:600">${esc(it.name)}${kindTag(it)}</span>
         <span style="margin-left:auto;font-size:11.5px;font-weight:600;padding:4px 11px;border-radius:999px;background:${C.tagBg};color:${C.tagFg}">${esc(tagTxt)}</span></div>
       <div style="display:flex;align-items:baseline;gap:20px;margin-top:12px;flex-wrap:wrap">
-        <div><span style="font-size:11px;color:#8a94a6;margin-right:7px">결과값</span><span style="font-family:${MONO};font-size:23px;font-weight:600;color:#27303f">${fmt(it.val, 2)}</span></div>
+        <div><span style="font-size:11px;color:#8a94a6;margin-right:7px">결과값</span><span style="font-family:${MONO};font-size:23px;font-weight:600;color:#27303f">${fmtVal(it.val)}</span></div>
         <div style="font-family:${MONO};font-size:13px;color:#5b6573">μ ${fmt(it.mean, it.mean != null && it.mean < 10 ? 3 : 1)}</div>
         <div style="font-family:${MONO};font-size:13px;color:#5b6573">σ ${fmt(it.sd, it.sd != null && it.sd < 10 ? 3 : 1)}</div>
         <div style="font-family:${MONO};font-size:14px;font-weight:600;color:${C.dot}">${sigStr(it.z)}</div></div>
@@ -388,7 +411,7 @@ function ootResults() {
     <div style="display:flex;align-items:center;gap:12px;margin:13px 2px 0;flex-wrap:wrap">
       <button data-act="jumpStab" style="display:flex;align-items:center;gap:8px;padding:9px 15px;border:1.5px solid #E5310F;border-radius:10px;background:#fff;color:#E5310F;font-size:12.5px;font-weight:600;cursor:pointer">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#E5310F" stroke-width="2"><path d="M3 3v18h18"></path><path d="m19 7-6 7-4-3-4 5"></path></svg>이 품목 안정성 분석</button></div>
-    ${sampleBanner}
+    ${sampleBanner}${stageEventsBox()}${lotStageNote(lot)}
     ${isStabType(S.ootTestType) ? ootStabTpTable() : ootBlock + normalItemsTable(lot)}`;
 }
 
@@ -433,16 +456,25 @@ function ootCompItem(label) {
 function ootCompData(comp) {
   const rows = [];
   const key = ootCompItem(comp);
-  let mean = null, sd = null, specLo = null, specHi = null, spec = null, sdRaw = null, sdFloored = false;
+  let mean = null, sd = null, specLo = null, specHi = null, spec = null, sdRaw = null, sdFloored = false, loq = null, kinds = {};
   S.lotSummary.lots.forEach(l => {
-    const it = (l.normalItems || []).concat(l.items || []).find(x => x.name === key.name && (key.group == null || (x.group || '') === key.group));
+    // 같은 로트에 같은 항목이 두 줄이면 이탈 쪽을 그린다(items 가 먼저) — 이탈한 값이 정상 값에 가려지지 않게
+    const it = (l.items || []).concat(l.normalItems || []).find(x => x.name === key.name && (key.group == null || (x.group || '') === key.group));
     if (it && it.val != null) {
-      rows.push([l.lot, it.val, l.seq || l.lot]);
+      rows.push([l.lot, it.val, l.seq || l.lot, it.status, it.z]);
       if (mean == null) { mean = it.mean; sd = it.sd; specLo = it.specLo; specHi = it.specHi; spec = it.spec; sdRaw = it.sdRaw; sdFloored = it.sdFloored; }
+      if (it.loq != null) loq = it.loq;
+      if (it.valKind) kinds[it.valKind] = (kinds[it.valKind] || 0) + 1;
     }
   });
   rows.sort((a, b) => String(a[2]).localeCompare(String(b[2])));   // 시계열(의뢰일자|제조번호) 오름차순
-  return { rows, mean, sd, specLo, specHi, spec, sdRaw, sdFloored };
+  return { rows, mean, sd, specLo, specHi, spec, sdRaw, sdFloored, loq, kinds };
+}
+// 결과값 표시 — 크기에 맞는 자릿수(0.004 가 0.00 으로 보이지 않게)
+function fmtVal(v) {
+  if (v == null || !isFinite(v)) return '—';
+  const a = Math.abs(v);
+  return fmt(v, a === 0 ? 2 : a < 0.1 ? 4 : a < 10 ? 3 : 2);
 }
 
 function isStabType(t) { return /안정성|stability|long ?term|ongoing|accel/i.test(t || ''); }
@@ -562,10 +594,10 @@ function ootCompSection() {
   if (!S.ootComp) {
     return `<div style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:18px 22px;margin-top:18px">${sel}</div>`;
   }
-  const { rows, mean, sd, sdRaw, sdFloored, spec } = ootCompData(S.ootComp);
+  const { rows, mean, sd, sdRaw, sdFloored, spec, loq, kinds } = ootCompData(S.ootComp);
   const vals = rows.map(r => r[1]);
-  let nOot = 0, nWarn = 0;
-  vals.forEach(v => { const z = sd ? Math.abs((v - mean) / sd) : 0; if (z > 3) nOot++; else if (z > 2) nWarn++; });
+  let nOot = 0, nWarn = 0, nTrend = 0;                    // 서버 판정(LOQ·검열값·연속 규칙 반영) 그대로 센다
+  rows.forEach(r => { if (r[3] === '관리이탈') nOot++; else if (r[3] === '경향이탈') nTrend++; else if (r[3] === '주의') nWarn++; });
   const tile = (lab, val, col) => `<div style="background:#fafbfd;border:1px solid #eef1f5;border-radius:10px;padding:8px 13px;min-width:62px"><div style="font-size:10px;color:#8a94a6;margin-bottom:2px">${lab}</div><div style="font-family:${MONO};font-size:14.5px;font-weight:600;color:${col || '#27303f'}">${val}</div></div>`;
   const strip = `<div style="display:flex;gap:9px;flex-wrap:wrap;margin:14px 0 4px">
     ${tile('평균 μ', fmt(mean, mean != null && mean < 10 ? 3 : 2))}
@@ -574,11 +606,13 @@ function ootCompSection() {
     ${tile('최대값', fmt(vals.length ? Math.max(...vals) : null, 2))}
     ${tile('LOT 수', rows.length)}
     ${tile('주의(2~3σ)', nWarn, nWarn ? '#b45309' : '#27303f')}
+    ${tile('경향이탈', nTrend, nTrend ? '#6d28d9' : '#27303f')}
     ${tile('관리이탈(3σ↑)', nOot, nOot ? '#b91c1c' : '#27303f')}</div>`;
   const legend = `<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px;font-size:11.5px;color:#5b6573">
     <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#2a78d6"></span>정상 ±2σ</span>
     <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#eda100"></span>주의 2~3σ</span>
     <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#d03b3b"></span>관리이탈 3σ↑</span>
+    <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#8b5cf6"></span>경향이탈(연속 규칙)</span>
     <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px solid #888"></span>중심선 μ</span>
     <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px dashed #eda100"></span>±2σ</span>
     <span style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px dotted #7c6fdd"></span>±3σ</span>
@@ -586,16 +620,20 @@ function ootCompSection() {
   const floorNote = sdFloored ? `<div style="margin:2px 0 8px;font-size:11.5px;color:#6d28d9;background:#f7f5ff;border:1px solid #e5ddfb;border-radius:8px;padding:7px 11px;display:inline-block">
     ⓘ 보고값이 반올림(분해능)돼 실측 σ=${fmt(sdRaw, 3)}가 매우 작아, <b>σ 하한(분해능 ${fmt(sd, 3)})</b>을 적용했습니다. 1단위 차이는 약 1σ로 판정됩니다.</div>` : '';
   const specNote = spec ? `<span style="font-size:11px;color:#9aa4b4;margin-left:8px">규격: ${esc(spec)}</span>` : '';
+  const kindList = Object.keys(kinds || {}).filter(k => VAL_KIND[k]).map(k => `${VAL_KIND[k]} ${kinds[k]}개 로트`);
+  const parseNote = (kindList.length || loq != null) ? `<div style="margin:2px 0 8px;font-size:11.5px;color:#4338ca;background:#eef2ff;border:1px solid #dfe3fb;border-radius:8px;padding:7px 11px;display:inline-block">
+    ⓘ LIMS 결과 원문을 숫자로 읽었습니다${kindList.length ? ': ' + esc(kindList.join(' · ')) : ''}.${loq != null ? ` 정량한계 LOQ ${fmtVal(loq)} — OOT 상한은 max(μ+3σ, LOQ) 이며 LOQ 이하 값은 높은 쪽 이탈로 보지 않습니다.` : ''}</div>` : '';
   return `<div style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);padding:18px 22px;margin-top:18px">
-    ${sel}${strip}${legend}${floorNote ? '<div>' + floorNote + specNote + '</div>' : ''}
+    ${sel}${strip}${legend}${floorNote ? '<div>' + floorNote + specNote + '</div>' : ''}${parseNote ? '<div>' + parseNote + '</div>' : ''}
     <div id="oot-comp-chart" style="min-height:360px"></div></div>`;
 }
 
 function buildOotCompPlotly() {
-  const { rows, mean, sd, specLo, specHi } = ootCompData(S.ootComp);
+  const { rows, mean, sd, specLo, specHi, loq } = ootCompData(S.ootComp);
   if (!rows.length || !sd) return null;
   const labels = rows.map(r => String(r[0])), vals = rows.map(r => r[1]);
-  const colors = vals.map(v => { const z = Math.abs((v - mean) / sd); return z > 3 ? '#d03b3b' : z > 2 ? '#eda100' : '#2a78d6'; });
+  const COL = { '관리이탈': '#d03b3b', '경향이탈': '#8b5cf6', '주의': '#eda100' };
+  const colors = rows.map(r => COL[r[3]] || '#2a78d6');                  // 서버 판정 색
   const flat = y => labels.map(() => y);
   const lim = (y, c, d, w) => ({ x: labels, y: flat(y), mode: 'lines', line: { color: c, width: w || 1.4, dash: d }, hoverinfo: 'skip', showlegend: false, type: 'scatter' });
   const data = [
@@ -605,17 +643,20 @@ function buildOotCompPlotly() {
   ];
   // 규격 기준선(상한/하한) — 있으면 진한 빨강 굵은 파선(APQR 점검표 스타일)
   if (specHi != null) data.push(lim(specHi, '#c0392b', 'dash', 2));
+  if (loq != null) data.push(lim(loq, '#4338ca', 'dashdot', 1.2));                  // 정량한계(OOT 상한의 바닥)
   if (specLo != null) data.push(lim(specLo, '#c0392b', 'dash', 2));
   data.push(
     { x: labels, y: vals, mode: 'markers', marker: { color: colors, size: 9, line: { color: '#fff', width: 1.2 } }, showlegend: false, type: 'scatter',
-      hovertemplate: rows.map(r => { const z = ((r[1] - mean) / sd).toFixed(2); const s = Math.abs(z) > 3 ? '관리이탈' : Math.abs(z) > 2 ? '주의' : '정상'; return `LOT ${r[0]}<br>결과값 ${r[1]} (z=${z}, ${s})<extra></extra>`; }) },
+      hovertemplate: rows.map(r => `LOT ${esc(r[0])}<br>결과값 ${fmtVal(r[1])} (z=${r[4] == null ? '—' : Number(r[4]).toFixed(2)}, ${esc(r[3] || '—')})<extra></extra>`) },
   );
   // y축 범위: 규격선까지 보이도록 여유 확보
   const ys = vals.concat([mean + 3 * sd, mean - 3 * sd]);
   if (specHi != null) ys.push(specHi);
+  if (loq != null) ys.push(loq);
   if (specLo != null) ys.push(specLo);
   const ymin = Math.min(...ys), ymax = Math.max(...ys), pad = (ymax - ymin) * 0.08 || 1;
   const anno = [];
+  if (loq != null) anno.push({ xref: 'paper', x: 1, y: loq, xanchor: 'right', yanchor: 'top', text: `LOQ ${fmtVal(loq)}`, showarrow: false, font: { size: 10, color: '#4338ca' } });
   if (specHi != null) anno.push({ xref: 'paper', x: 1, y: specHi, xanchor: 'right', yanchor: 'bottom', text: `기준상한 ${specHi}`, showarrow: false, font: { size: 10, color: '#c0392b' } });
   if (specLo != null) anno.push({ xref: 'paper', x: 1, y: specLo, xanchor: 'right', yanchor: 'top', text: `기준하한 ${specLo}`, showarrow: false, font: { size: 10, color: '#c0392b' } });
   const layout = { height: 360, margin: { l: 48, r: 16, t: 12, b: 54 }, xaxis: { title: '제조번호 (LOT)', type: 'category', tickangle: -45, tickfont: { size: 10 }, gridcolor: '#f5f6f9' }, yaxis: { title: '결과값', gridcolor: '#eef1f5', zeroline: false, range: [ymin - pad, ymax + pad] }, annotations: anno, plot_bgcolor: '#fff', paper_bgcolor: '#fff', font: { family: 'Pretendard Variable, sans-serif', size: 11 }, hovermode: 'closest' };
@@ -956,7 +997,7 @@ function stabPage() {
     const um = A.unmatchedRemarks || [], cv = A.convertedRemarks || [], cf = A.monthConflicts || [];
     if (!um.length && !cv.length && !cf.length && !A.specAssumed) return '';
     const parts = [];
-    if (A.specAssumed) parts.push('<b>규격 문구를 읽지 못해 수동 입력 기본값(90~150)으로 계산했습니다.</b> 유효기간·규격 이탈·유의적 변화는 참고용이 아니라 판정하지 않았습니다. 시험기준 표기를 확인하세요.');
+    if (A.specAssumed) parts.push('<b>규격 문구를 읽지 못해 수동 입력 기본값(90~150)으로 계산했습니다.</b> 유효기간은 참고용이며, 규격 이탈·유의적 변화는 판정하지 않았습니다. 시험기준 표기를 확인하세요.');
     if (um.length) parts.push(`<b>시점을 읽지 못해 제외된 결과 ${A.unmatchedRows}건</b>: ` + um.map(u => `“${esc(u.remark)}” ${u.rows}건`).join(', ') + ' — 의뢰 특이사항 표기를 확인하세요.');
     if (cf.length) parts.push('<b>의뢰 특이사항과 안정성 일정표가 달라 일정표를 따랐습니다</b>: ' + cf.map(c => `“${esc(c.remark)}” → 일정표 ${esc(c.schedule)} (${c.rows}건)`).join(', '));
     if (cv.length) parts.push('환산해 사용: ' + cv.map(c => `“${esc(c.remark)}” → ${c.months}개월${c.by ? ' (' + esc(c.by) + ')' : ''} (${c.rows}건)`).join(', '));
@@ -1432,7 +1473,7 @@ function alarmPage() {
       <div style="font-size:12px;color:#9aa4b4;margin-bottom:14px">${S.alarmFromEnv ? '⚠ 비밀번호가 .env(OOT_ALERT_PASSWORD)로 고정되어 있어 화면에서 변경할 수 없습니다.' : '알림 설정 진입 비밀번호를 변경합니다.'}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input id="pw-cur" type="password" placeholder="현재 비밀번호" ${S.alarmFromEnv ? 'disabled' : ''} style="width:150px;padding:9px 12px;border:1px solid #d7dce4;border-radius:10px;font-size:12.5px;font-family:${MONO};outline:none">
-        <input id="pw-new" type="password" placeholder="새 비밀번호(4자+)" ${S.alarmFromEnv ? 'disabled' : ''} style="width:150px;padding:9px 12px;border:1px solid #d7dce4;border-radius:10px;font-size:12.5px;font-family:${MONO};outline:none">
+        <input id="pw-new" type="password" placeholder="새 비밀번호(8자 이상, 숫자만 불가)" ${S.alarmFromEnv ? 'disabled' : ''} style="width:150px;padding:9px 12px;border:1px solid #d7dce4;border-radius:10px;font-size:12.5px;font-family:${MONO};outline:none">
         <button data-act="changePw" ${S.alarmFromEnv ? 'disabled' : ''} style="padding:9px 16px;border:none;border-radius:10px;background:${S.alarmFromEnv ? '#cbd2dc' : '#E5310F'};color:#fff;font-size:12.5px;font-weight:600;cursor:${S.alarmFromEnv ? 'default' : 'pointer'}">변경</button>
         <span id="pw-msg" style="font-size:12px;font-weight:600"></span></div></div>
   </div>`;
@@ -1540,7 +1581,7 @@ function grpPickSaved(gid) {
   loadGroupItems();
 }
 async function grpDelSaved(gid) {
-  try { const r = await postJSON('/api/group/delete', { group_id: gid }); S.groupList = r.groups || S.groupList; render(); } catch (e) {}
+  try { const r = await postJSON('/api/group/delete', { group_id: gid }); if (r.ok === false && r.status === 403) { alert('품목군 삭제는 관리자만 할 수 있습니다(알림 설정에서 관리자 확인 후 다시 시도).'); return; } S.groupList = r.groups || S.groupList; render(); } catch (e) {}
 }
 
 function groupDropdown() {
@@ -1956,7 +1997,7 @@ async function unlockAlarm() {
 }
 async function testSend() {
   const m = $('#alarm-test-msg'); if (m) { m.textContent = '발송 중…'; m.style.color = '#5b6573'; }
-  try { const r = await postJSON('/api/alarm/test', {}); if (m) { m.textContent = (r.ok ? '✓ ' : '✗ ') + r.msg; m.style.color = r.ok ? '#15803d' : '#dc2626'; } }
+  try { const r = await postJSON('/api/alarm/test', {}); if (adminExpired(r)) { render(); return; } if (m) { m.textContent = (r.ok ? '✓ ' : '✗ ') + r.msg; m.style.color = r.ok ? '#15803d' : '#dc2626'; } }
   catch (e) { if (m) { m.textContent = '발송 실패: ' + e.message; m.style.color = '#dc2626'; } }
 }
 async function changePw() {
@@ -1964,6 +2005,7 @@ async function changePw() {
   if (!cur || !nw) return;
   try {
     const r = await postJSON('/api/alarm/password', { current: cur.value, new: nw.value });
+    if (adminExpired(r)) { render(); return; }
     if (msg) { msg.textContent = (r.ok ? '✓ ' : '✗ ') + (r.msg || ''); msg.style.color = r.ok ? '#15803d' : '#dc2626'; }
     if (r.ok) { cur.value = ''; nw.value = ''; }
   } catch (e) { if (msg) { msg.textContent = '변경 실패: ' + e.message; msg.style.color = '#dc2626'; } }

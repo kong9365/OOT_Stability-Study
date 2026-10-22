@@ -123,8 +123,7 @@ def _convert(value, type_name: str):
     return value  # STRING, DATE('2026-09-14'), TIMESTAMP(ISO 문자열), BINARY(base64 문자열)
 
 
-def query(sql: str, params: dict | None = None, large: bool = False) -> list[dict]:
-    """SQL 실행 후 행을 dict 목록으로 반환. 파라미터는 :name 마커 사용. 결과 25MB 초과 예상 시 large=True."""
+def _statement(sql: str, params: dict | None, large: bool) -> dict:
     body = {
         "warehouse_id": WAREHOUSE_ID,
         "statement": sql,
@@ -142,26 +141,62 @@ def query(sql: str, params: dict | None = None, large: bool = False) -> list[dic
         resp = _request("GET", f"{HOST}/api/2.0/sql/statements/{sid}")
     if resp["status"]["state"] != "SUCCEEDED":
         raise RuntimeError(f"statement {sid} {resp['status']['state']}: {resp['status'].get('error')}")
+    return resp
 
-    columns = resp["manifest"]["schema"]["columns"]
-    names = [c["name"] for c in columns]
-    types = [c["type_name"] for c in columns]
-    rows: list[list] = []
+
+def _download(link: str) -> list:
+    """사전서명 클라우드 스토리지 조각. 오류 글에 서명 주소(그 자체로 열람 권한)를 넣지 않는다."""
+    try:
+        data = requests.get(link, timeout=300)     # Databricks Authorization 헤더를 붙이지 않음
+    except requests.RequestException as e:
+        raise RuntimeError(f"결과 조각 다운로드 실패({type(e).__name__})") from None
+    if data.status_code >= 400:
+        raise RuntimeError(f"결과 조각 다운로드 실패(HTTP {data.status_code})")
+    return data.json()
+
+
+def _raw_rows(resp: dict, large: bool):
+    """조각마다 원시 행 목록을 낸다."""
     chunk = resp.get("result") or {}
     while True:
         nxt = chunk.get("next_chunk_internal_link")
         if large:
             for link in chunk.get("external_links") or []:
-                # 사전서명 클라우드 스토리지 URL: Databricks Authorization 헤더를 붙이지 않음
-                data = requests.get(link["external_link"], timeout=300)
-                data.raise_for_status()
-                rows.extend(data.json())
+                yield _download(link["external_link"])
                 nxt = link.get("next_chunk_internal_link") or nxt
         else:
-            rows.extend(chunk.get("data_array") or [])
+            yield chunk.get("data_array") or []
         if not nxt:
             break
         chunk = _request("GET", HOST + nxt)
+
+
+def query_iter(sql: str, params: dict | None = None):
+    """큰 결과를 조각 단위로 한 행씩 낸다(EXTERNAL_LINKS) — 전부를 한꺼번에 메모리에 올리지 않는다."""
+    resp = _statement(sql, params, True)
+    sid = resp["statement_id"]
+    names = [c["name"] for c in resp["manifest"]["schema"]["columns"]]
+    types = [c["type_name"] for c in resp["manifest"]["schema"]["columns"]]
+    got = 0
+    for part in _raw_rows(resp, True):
+        got += len(part)
+        for row in part:
+            yield {n: _convert(v, t) for n, v, t in zip(names, row, types)}
+    expected = resp["manifest"].get("total_row_count")
+    if expected is not None and expected != got:
+        raise RuntimeError(f"statement {sid}: expected {expected} rows, received {got}")
+
+
+def query(sql: str, params: dict | None = None, large: bool = False) -> list[dict]:
+    """SQL 실행 후 행을 dict 목록으로 반환. 파라미터는 :name 마커 사용. 결과 25MB 초과 예상 시 large=True."""
+    resp = _statement(sql, params, large)
+    sid = resp["statement_id"]
+    columns = resp["manifest"]["schema"]["columns"]
+    names = [c["name"] for c in columns]
+    types = [c["type_name"] for c in columns]
+    rows: list[list] = []
+    for part in _raw_rows(resp, large):
+        rows.extend(part)
     expected = resp["manifest"].get("total_row_count")
     if expected is not None and expected != len(rows):
         raise RuntimeError(f"statement {sid}: expected {expected} rows, received {len(rows)}")

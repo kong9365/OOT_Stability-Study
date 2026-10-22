@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import re
 import time
 
 from dotenv import load_dotenv
@@ -42,6 +43,9 @@ import kst  # noqa: E402
 
 STATE_PATH = os.path.join(_HERE, ".oot_alarm_state.json")
 KEY_MARK = "#keys-v2"                    # 발송 기록 열쇠를 새 꼴로 옮겼다는 표지(옛 코드는 무시)
+# 결과 원문 해석(result_parse, 2026-10-22)으로 예전엔 못 읽던 과거 결과가 처음 계산에 들어온다 —
+# 그 첫 실행 한 번은 보내지 않고 기준선으로만 기록한다(과거 건 메일이 한꺼번에 몰리지 않게).
+PARSE_MARK = "#parse-v1"
 KEY_MODE = os.getenv("OOT_ALARM_KEY_MODE", "migrate").strip().lower()
 LOG_PATH = os.path.join(_HERE, "oot_alarm.log")
 DASH_URL = os.getenv("OOT_DASHBOARD_URL", "http://localhost:8502")
@@ -54,7 +58,21 @@ OOT_TEST_TYPES = [
 ]
 
 
+_URL_RE = re.compile(r"https?://\S+")
+HEARTBEAT_PATH = os.path.join(os.environ.get("TMPDIR", "/tmp"), "oot_alarm_heartbeat")
+
+
+def _beat() -> None:
+    """살아 있음 표시(컨테이너 안 임시 파일) — /api/health 가 오래 갱신 안 되면 알람이 죽은 것으로 본다."""
+    try:
+        with open(HEARTBEAT_PATH, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
+
 def _log(msg: str) -> None:
+    msg = _URL_RE.sub("[주소 생략]", str(msg))      # 서명 주소 등은 로그·이력 화면에 남기지 않는다
     line = f"[{kst.now():%Y-%m-%d %H:%M:%S}] {msg}"
     print(line, flush=True)
     try:
@@ -76,6 +94,8 @@ def _ensure_internet_before_send() -> bool:
       > 이 폴더의 network_gate.json.
     실패해도 예외로 죽지 않고 발송을 시도한다(실패 시 다음 주기 재시도).
     """
+    if axhub_mail.available():
+        return True                      # axhub 운영: HTTPS 플랫폼 메일 — 사내망 포털 확인 불필요
     try:
         import network_gate  # 같은 폴더에 복사됨
     except Exception as e:
@@ -106,9 +126,19 @@ def _oot_status(s) -> str:
     return "데이터부족"
 
 
-def load_state() -> set:
-    keys = storage_io.read_json(STATE_PATH)
-    return set(keys) if keys is not None else set()
+def load_state():
+    """발송 기록(본 OOT 열쇠). 파일이 없으면 None, 읽기 오류면 예외(빈 기록으로 보고 메일을 다시 보내지 않게)."""
+    keys = storage_io.read_json_strict(STATE_PATH)
+    return set(keys) if keys is not None else None
+
+
+def _alarm_types() -> list:
+    """감시 대상 — 화면과 같은 전체 시험종류(2026-10-22). 목록 조회 실패 시 고정 목록."""
+    try:
+        types = core.oot_test_types()
+        return list(types) if types else list(OOT_TEST_TYPES)
+    except Exception:
+        return list(OOT_TEST_TYPES)
 
 
 def save_state(keys) -> None:
@@ -130,7 +160,12 @@ def _migrate_keys(state: set, cur: dict, old_of: dict) -> None:
 
 
 def check_once() -> None:
-    cfg = oot_mail.load_config()
+    _beat()
+    try:
+        cfg = oot_mail.load_config(strict=True)
+    except Exception as e:
+        _log(f"알림 설정을 읽지 못해 이번 점검을 건너뜀({type(e).__name__}) — 다음 주기 재시도")
+        return
     if not cfg.get("enabled", True):
         _log("알람 비활성화(enabled=false) — 건너뜀")
         return
@@ -138,10 +173,11 @@ def check_once() -> None:
 
     # Databricks에서 전 시험종류를 한 번에 조회(±2σ 초과 후보, 평균·표준편차 포함).
     try:
-        candidates = core.fetch_oot_rows_for_types(OOT_TEST_TYPES)
+        candidates = core.fetch_oot_rows_for_types(_alarm_types())
     except Exception as e:
-        _log(f"Databricks 조회 실패: {e}")
+        _log(f"Databricks 조회 실패: {type(e).__name__}: {e}")
         return
+    _beat()
 
     cur = {}
     old_of = {}                          # 새 열쇠 -> 옛 꼴 열쇠(대분류 없음, a4ef25c)
@@ -160,16 +196,29 @@ def check_once() -> None:
                     "결과값": r.get("LOT결과_0제외", ""), "분류": r.get("OOT_구간분류_히트맵", ""),
                     "평균": r.get("확인_평균", ""), "표준편차": r.get("확인_표준편차", "")}
 
-    first_run = not storage_io.exists(STATE_PATH)
-    if first_run:
-        save_state(set(cur) | set(old_of.values()) | {KEY_MARK})
+    try:
+        state = load_state()
+    except Exception as e:
+        _log(f"발송 기록을 읽지 못해 이번 점검을 건너뜀({type(e).__name__}) — 다음 주기 재시도")
+        return
+    if state is None:                    # 처음 실행
+        save_state(set(cur) | set(old_of.values()) | {KEY_MARK, PARSE_MARK})
         _log(f"초기 기준선 설정: 현재 OOT {len(cur)}건 기록(발송 안함). 이후 신규분만 발송. "
              f"[대상={'/'.join(sorted(targets))}]")
         return
 
-    state = load_state()
     if KEY_MARK not in state:            # 새 코드 첫 실행 — 한 번만
         _migrate_keys(state, cur, old_of)
+        state.add(PARSE_MARK)
+        save_state(state)
+    elif PARSE_MARK not in state:        # 값 해석 확장 뒤 첫 실행 — 한 번만, 보내지 않음
+        state.update(set(cur) | set(old_of.values()))
+        state.add(PARSE_MARK)
+        save_state(state)
+        _log(f"결과 원문 해석 확장 — 현재 OOT {len(cur)}건을 기준선으로 기록(이번에는 발송 안 함). "
+             "다음 실행부터 신규분만 발송. 기록한 건(앞 20): "
+             + ", ".join(sorted(f"{v['품목코드']}/{v['제조번호']}/{v['시험항목']}" for v in cur.values())[:20]))
+        return
     new_keys = [k for k in cur if k not in state]
     if not new_keys:
         _log(f"신규 OOT 없음 (현재 {len(cur)} · 이력 {len(state)} · 대상 {'/'.join(sorted(targets))})")
@@ -263,6 +312,13 @@ def main():
         check_once()
         return
 
+    def _beat_loop():                    # 프로세스가 살아 있는 동안 30초마다 — 조회가 길어도 갱신된다
+        while True:
+            _beat()
+            time.sleep(30)
+    import threading
+    threading.Thread(target=_beat_loop, daemon=True).start()
+
     def _load_schedule():
         """스케줄 결정 — 우선순위: CLI 인자 > 설정파일(schedule) > 기본값(매일 07:30).
         매 루프마다 다시 읽으므로 알림설정 화면에서 바꾼 값이 재시작 없이 1분 내 반영된다."""
@@ -312,6 +368,7 @@ def main():
             if mode == "daily":
                 secs = next_run - last_run
                 _log(f"다음 실행까지 {int(secs // 3600)}시간 {int((secs % 3600) // 60)}분 대기 ({_desc(mode, dt, iv)})")
+        _beat()
         time.sleep(max(1, min(30, next_run - time.time())))
 
 

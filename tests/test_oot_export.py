@@ -77,8 +77,10 @@ def test_line_shape_and_order():
     by_reason = {}
     for x in lines:
         by_reason.setdefault(x["excluded_reason"], []).append(x)
-    assert {x["status"] for x in by_reason["거짓 0"] + by_reason["재시험 원값(잠정)"]} == {"계산 제외"}
-    assert {x["in_calc"] for x in by_reason["거짓 0"]} == {"N"}
+    # 거짓 0(원문 숫자·저장 0)은 2026-10-22 부터 원문 숫자로 계산에 들어간다 — 뺀 줄 목록에 없다
+    assert "거짓 0" not in by_reason
+    assert {x["status"] for x in by_reason["재시험 원값(잠정)"]} == {"계산 제외"}
+    assert {x["in_calc"] for x in by_reason["재시험 원값(잠정)"]} == {"N"}
     assert {x["status"] for x in by_reason["서식 결과(결정 전)"]} == {"정성"}
     assert any(x["lot_blank"] == "Y" and x["in_calc"] == "Y" for x in lines)   # 빈 제조번호도 평균에 들어감
     assert any(x["rules"] for x in lines if x["status"] == "경향이탈")
@@ -129,7 +131,7 @@ def test_counts_and_meta():
     assert meta["counts_by_test_type"][F.TT_FIN]["rows"] == sum(r["BIZPROCESS_NM"] == F.TT_FIN for r in rows)
     assert meta["counts_by_test_type"]["의약외품(완제품)"] == {"rows": 0, "source_rows": 0}
     assert len(meta["test_types"]) == 7 and len(oot_export.TEST_TYPES) == 7
-    assert meta["excluded_counts"] == {"거짓 0": 2, "재시험 원값(잠정)": 2, "서식 결과(결정 전)": 1}
+    assert meta["excluded_counts"] == {"재시험 원값(잠정)": 2, "서식 결과(결정 전)": 1}
     assert meta["schema"] == "oot-export/1" and meta["freshness"] == {"ok": True, "reason": ""}
     assert meta["data_as_of"] == "2026-10-03T18:40:00Z"
     assert meta["app_only_counts"]["trend"] > 0

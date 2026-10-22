@@ -17,8 +17,8 @@ def test_screen_splits_same_name_by_group(fake_dbx):
     for it in _items(resp, "성분가"):
         by_group.setdefault(it["group"], []).append(it)
     assert set(by_group) == {"함량", "용출"}
-    # 함량: 로트 24 + 제조번호 빈 줄 2(빈 줄의 N/A 줄은 그대로 남음) · 용출: 로트 24
-    assert {it["baseN"] for it in by_group["함량"]} == {26}
+    # 함량: 로트 24 + 제조번호 빈 줄 2(빈 줄의 N/A 줄은 그대로 남음) + 거짓 0 줄의 원문 숫자 1 · 용출: 로트 24
+    assert {it["baseN"] for it in by_group["함량"]} == {27}
     assert {it["baseN"] for it in by_group["용출"]} == {24}
     assert 99 < by_group["함량"][0]["mean"] < 101
     assert 93 < by_group["용출"][0]["mean"] < 97
@@ -50,17 +50,20 @@ def test_excel_one_sheet_per_group_item(fake_dbx, monkeypatch):
 
 
 def test_alarm_groups_by_major_category(monkeypatch):
+    """알람의 평균·σ 는 '대분류+시험항목' 묶음마다 — 같은 이름이라도 대분류가 다르면 따로(D-3①)."""
     import databricks_client as dbx
     import kdp_core
     seen = []
 
-    def _q(sql, params=None, large=False):
-        seen.append(sql)
-        return [{"BIZPROCESS_NM": F.TT_FIN, "ITEM_NM": F.P1_NAME, "ITEM_CD": F.P1, "LOT_NO": "23010",
-                 "GROUP_NM": "용출", "TESTITEM_NM": "성분가", "RULE_VALUE": 80, "Z_SCORE": -3.5,
-                 "MEAN_VALUE": 95.0, "STDDEV_VALUE": 4.2, "RESULT_VALUE_NUMBER": 80}]
-    monkeypatch.setattr(dbx, "query", _q)
+    def row(lot, grp, v, text=None):
+        return {"BIZPROCESS_NM": F.TT_FIN, "ITEM_NM": F.P1_NAME, "ITEM_CD": F.P1, "LOT_NO": lot,
+                "GROUP_NM": grp, "TESTITEM_NM": "성분가", "RULE_VALUE": v, "RESULT_TEXT": text,
+                "RESULT_YN": "Y", "EXCLUDED_REASON": ""}
+    rows = [row(f"23{i:03d}", "용출", 95.0 + (i % 3) * 0.5) for i in range(12)] + [row("23099", "용출", 80.0)]
+    rows += [row(f"23{i:03d}", "함량", 80.0 + (i % 3) * 0.5) for i in range(12)]   # 다른 대분류: 80 이 정상
+    monkeypatch.setattr(dbx, "query_iter", lambda sql, params=None: iter(seen.append(sql) or rows))
     out = kdp_core.fetch_oot_rows_for_types([F.TT_FIN])
-    assert "PARTITION BY ITEM_CD, BIZPROCESS_NM, GROUP_NM, TESTITEM_NM" in seen[0]
-    assert out[0]["대분류"] == "용출" and out[0]["시험항목"] == "성분가"
-    assert out[0]["OOT_구간분류_히트맵"].startswith("관리이탈")
+    assert "FROM ruled" in seen[0]
+    hits = [(o["대분류"], o["제조번호"]) for o in out]
+    assert hits == [("용출", "23099")]
+    assert out[0]["시험항목"] == "성분가" and out[0]["OOT_구간분류_히트맵"].startswith("관리이탈")

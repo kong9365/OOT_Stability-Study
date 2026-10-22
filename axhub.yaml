@@ -18,7 +18,6 @@ env:
   optional:
     - name: DATABRICKS_HOST
     - name: DATABRICKS_WAREHOUSE_ID
-    - name: API_KEY
     - name: OOT_ALARM_KEY_MODE
     - name: OOT_ALARM_OFF
     - name: OOT_EXPORT_OFF

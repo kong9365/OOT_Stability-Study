@@ -23,22 +23,23 @@ def _all_items(lot):
     return lot["items"] + lot["normalItems"]
 
 
-def test_screen_drops_false_zero_and_provisional_retest(fake_dbx):
+def test_screen_uses_text_for_false_zero_and_drops_provisional_retest(fake_dbx):
+    """거짓 0(원문 숫자·저장 숫자 0): 2026-10-22 부터 원문 숫자를 쓴다 — LIMS 글자형 칸 저장 방식이라
+    단위 붙은 결과('76 ppm', 저장 0)와 같게 다룬다. 재시험 원값(잠정)은 예전처럼 뺀다."""
     import kdp_core
     fake_dbx(F.rule_rows())
     resp = kdp_core.oot_lot_summary(F.P1, F.TT_FIN, None)
     lots = _lots(resp)
-    assert lots["23001"]["excluded"] == {"거짓 0": 1}
-    assert lots["23005"]["excluded"] == {"거짓 0": 1}
+    assert lots["23001"]["excluded"] == {}
+    assert lots["23005"]["excluded"] == {}
     assert lots["23007"]["excluded"] == {"재시험 원값(잠정)": 1}
     assert lots["23002"]["excluded"] == {}
-    assert {k: len(v) for k, v in resp["excluded"].items()} == {"거짓 0": 2, "재시험 원값(잠정)": 1}
-    assert resp["excluded"]["거짓 0"][0] == {"lot": "23001", "group": "함량", "name": "성분가",
-                                           "text": "100.20", "raw": "0.000000"}
+    assert {k: len(v) for k, v in resp["excluded"].items()} == {"재시험 원값(잠정)": 1}
     assert "잠정" in resp["ruleNote"]
-    # 거짓 0 줄의 0 과 원시험 92.0 은 어느 로트 항목에도 값으로 나오지 않는다
+    # 저장 숫자 0 은 값으로 나오지 않고 원문 100.20 이 쓰인다. 원시험 92.0 은 여전히 빠진다
     vals = [(it["name"], it["val"]) for l in resp["lots"] for it in _all_items(l)]
     assert ("성분나", 0.0) not in vals and ("성분가", 0.0) not in vals
+    assert ("성분가", 100.2) in vals
     assert ("성분가", 92.0) not in vals
     # 뺀 줄은 정성 개수에 섞이지 않는다(23005: 확인시험 1건만 정성)
     assert lots["23005"]["qual"] == 1
@@ -62,7 +63,8 @@ def test_year_filter_limits_excluded_list(fake_dbx):
     import kdp_core
     fake_dbx(F.rule_rows())
     assert kdp_core.oot_lot_summary(F.P1, F.TT_FIN, "2024")["excluded"] == {}
-    assert len(kdp_core.oot_lot_summary(F.P1, F.TT_FIN, "2023")["excluded"]["거짓 0"]) == 2
+    ex23 = kdp_core.oot_lot_summary(F.P1, F.TT_FIN, "2023")["excluded"]
+    assert "거짓 0" not in ex23 and len(ex23["재시험 원값(잠정)"]) == 1
 
 
 def test_excel_uses_rule_values(fake_dbx, monkeypatch):
@@ -84,8 +86,10 @@ def test_ruled_csv_keeps_old_columns_identical():
     import kdp_core
     row = [r for r in F.rule_rows() if r["EXCLUDED_REASON"] == "거짓 0"][0]
     k = kdp_core._row_to_korean(row)
-    assert k["LOT결과_0제외"] == "0.000000" and k["확인_표준편차"] == "1"
-    assert k["규칙적용값"] == "" and k["뺀까닭"] == "거짓 0" and k["결과원문"] == "100.20"
+    # 거짓 0 줄: 안정성·APQR 이 읽는 칸에도 0 대신 원문 숫자(2026-10-22 — 예전엔 0 이 회귀·풀링에 섞였다)
+    assert k["LOT결과_0제외"] == "100.2" and k["확인_표준편차"] == "1"
+    # 거짓 0 줄: 예전 칸은 그대로, 규칙 적용 값은 원문 숫자(2026-10-22)
+    assert k["규칙적용값"] == "100.2" and k["뺀까닭"] == "" and k["결과원문"] == "100.20"
     assert kdp_core._FULL_FIELDS[:14] == ["품목코드", "품목", "제조번호", "시험항목", "대분류", "시험기준",
                                           "LOT결과_0제외", "확인_평균", "확인_표준편차",
                                           "OOT_구간분류_히트맵", "의뢰일자", "제조일자", "유효기한",
@@ -161,11 +165,12 @@ def test_oot_paths_read_rule_columns(fake_dbx, monkeypatch):
         seen.append(sql)
         return []
     monkeypatch.setattr(dbx, "query", _q)
+    monkeypatch.setattr(dbx, "query_iter", lambda sql, params=None: iter(_q(sql, params)))
     kdp_core._DATA_CACHE.clear()
     kdp_core._fetch_csv({"vf_시험종류": F.TT_FIN, "vf_품목코드": F.P1})
     kdp_core.fetch_oot_rows_for_types([F.TT_FIN])
     assert "SELECT * FROM ruled WHERE" in seen[0] and "D4_HAS_OTHER" not in seen[0]
-    assert "FROM ruled" in seen[1] and "avg(RULE_VALUE)" in seen[1]
+    assert "FROM ruled" in seen[1] and "RULE_VALUE" in seen[1] and "RESULT_TEXT" in seen[1]   # 알람도 원문 해석
     assert "D4_HAS_OTHER" in seen[1]                          # 알람은 조회문이 D-4 까지 낸다
     assert "RESULT_VALUE_NUMBER - MEAN_VALUE" not in seen[1]
 
@@ -248,7 +253,7 @@ def test_screen_d4_same_under_shuffled_rows(fake_dbx):
     import kdp_core
     rows = F.rule_rows()
     orders = [rows, rows[::-1]] + [random.Random(s).sample(rows, len(rows)) for s in (1, 2, 3)]
-    for tt, n_cut in ((F.TT_FIN, 3), (F.TT_LT, 1)):
+    for tt, n_cut in ((F.TT_FIN, 1), (F.TT_LT, 1)):           # 완제품: 거짓 0 2줄은 이제 원문 숫자로 계산
         views = []
         for rs in orders:
             fake_dbx(rs)

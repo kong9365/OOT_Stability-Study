@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Optional
 
+import kst
 from lims_parser import classify_month
 
 
@@ -78,7 +79,7 @@ def lot_schedule(rows: Optional[list], today: Optional[_dt.date] = None) -> dict
     종료: 마지막 시점이 의뢰됨 / 지연: 남은 시점 중 가장 이른 예정일이 오늘 이전 / 진행: 그 밖 /
     중지: 계획이 STOP 으로 끝남. 한 제조번호에 계획이 여럿이면 시점이 가장 많은 계획을 쓴다.
     """
-    today = today or _dt.date.today()
+    today = today or kst.now().date()          # 컨테이너 시계(UTC)가 아니라 한국 날짜
     plans: dict = {}
     for r in rows or []:
         plans.setdefault(str(r.get("PLAN_ID")), []).append(r)

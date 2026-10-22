@@ -19,6 +19,7 @@ import io
 import os
 import pickle
 import re
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +31,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 import databricks_client as dbx
+import result_parse as rp
 from stability import analyze_dataframe, ci_bound  # 검증된 회귀 엔진 재사용
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=False)
@@ -218,7 +220,7 @@ _RESULTS_CTE_ALL = _RESULTS_CTE.replace(_APPROVED_SQL, "") if _APPROVED_SQL else
 _OOT_CTE_ALARM = _RESULTS_CTE_ALL + _OOT_CTE[len(_RESULTS_CTE):]
 
 # 조회문 규칙이 계산에서 뺀 줄의 까닭(서식 결과는 값이 원래 비어 있어 따로 떼지 않는다).
-OOT_EXCLUDE_REASONS = ("거짓 0", "재시험 원값(잠정)")
+OOT_EXCLUDE_REASONS = ("거짓 0", "재시험 원값(잠정)", rp.STAGE_REASON)
 RULE_NOTE = ("재시험 원값(잠정 규칙): LIMS 적부가 N/A 인 원시험 값은, 같은 제조번호·대분류·시험항목"
              "(안정성은 같은 의뢰)에 다른 숫자 결과가 있으면 계산에서 뺍니다. 재시험 최종 표시를 "
              "받기 전까지 쓰는 잠정 규칙입니다.")
@@ -226,6 +228,9 @@ RULE_NOTE = ("재시험 원값(잠정 규칙): LIMS 적부가 N/A 인 원시험 
 
 def _sql_literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
+
+
+_FALSE_ZERO_USE_TEXT = os.getenv("OOT_FALSE_ZERO_USE_TEXT", "1").strip() not in ("0", "false", "False")
 
 
 def _row_to_korean(r: dict) -> dict:
@@ -241,6 +246,31 @@ def _row_to_korean(r: dict) -> dict:
     v = r.get("RESULT_VALUE_NUMBER")
     is_quant = v is not None
     vs = "" if v is None else str(v)
+    # OOT 경로(규칙적용값)만: 순수 숫자가 아닌 결과 원문('76 ppm'·'N/D'·'<0.05 %'·용출 6개 값)을 읽는다.
+    # 안정성·APQR 이 읽는 LOT결과_0제외 는 그대로(예전 값). 규칙은 result_parse 모듈 머리말.
+    rule_v, reason = r.get("RULE_VALUE"), r.get("EXCLUDED_REASON") or ""
+    text, nm, grp = r.get("RESULT_TEXT"), r.get("TESTITEM_NM") or "", r.get("GROUP_NM") or ""
+    kind, loq = ("숫자" if rule_v is not None else ""), None
+    stage = rp.stage_of(nm)
+    if reason == "거짓 0":
+        # 원문은 0 아닌 숫자인데 저장 숫자만 0 — LIMS 가 글자형 칸 결과를 저장하는 방식(단위 붙은 결과와 같음).
+        # 2026-10-22 전수 조사: 5,764줄 중 5,725줄이 적부 적합 → 원문 숫자를 쓴다(되돌림: OOT_FALSE_ZERO_USE_TEXT=0).
+        # 안정성·APQR 이 읽는 LOT결과_0제외 에도 0 이 들어가지 않게 한다(예전엔 0 이 회귀·풀링에 섞였다).
+        tv = _num(text)
+        if _FALSE_ZERO_USE_TEXT and tv == tv:
+            reason, vs, is_quant = "", str(tv), True
+        else:
+            vs, is_quant = "", False
+    if stage is not None and stage >= 2:
+        if rule_v is not None or not rp.is_blank_result(text):     # 2차 이상을 실제로 한 줄
+            rule_v, reason, kind = None, rp.STAGE_REASON, "2차이상"
+    elif rule_v is None and not reason and (str(r.get("RESULT_YN") or "") != "A" or stage == 1):
+        # 다단계 시험의 1차 결과는 2차로 넘어가 적부가 N/A 여도 넣는다(1차 트렌딩은 전 로트 — PDA TR 56)
+        pv, kind, loq = rp.parse_result(text, nm, grp)
+        if pv is not None:
+            rule_v = round(pv, 6)
+        else:
+            kind = ""
 
     def _s(x) -> str:
         return "" if x is None else str(x)
@@ -253,12 +283,13 @@ def _row_to_korean(r: dict) -> dict:
         "의뢰일자": r.get("REQUEST_DATE") or "", "제조일자": r.get("LOT_DATE") or "",
         "유효기한": r.get("EXPIRE_DATE") or "", "의뢰 특이사항": r.get("REQUEST_REMARK") or "",
         "결과원문": _s(r.get("RESULT_TEXT")), "저장숫자원값": _s(r.get("RESULT_NUMBER_RAW")),
-        "규칙적용값": _s(r.get("RULE_VALUE")), "뺀까닭": _s(r.get("EXCLUDED_REASON")),
+        "규칙적용값": _s(rule_v), "뺀까닭": _s(reason),
         "의뢰번호": _s(r.get("REQUEST_NO")), "REQUEST_ID": _s(r.get("REQUEST_ID")),
         "ORDER_ID": _s(r.get("ORDER_ID")), "TESTITEM_ID": _s(r.get("TESTITEM_ID")),
         "차수": _s(r.get("ORDER_SEQ")), "순번": _s(r.get("TESTITEM_SEQ")),
         "적부": _s(r.get("RESULT_YN")), "재시험": _s(r.get("RETEST_ITEM_YN")),
         "시험종류코드": _s(r.get("BIZPROCESS_CD")),
+        "값해석": kind, "LOQ": "" if loq is None else str(loq),
     }
 
 
@@ -267,7 +298,7 @@ _FULL_FIELDS = ["품목코드", "품목", "제조번호", "시험항목", "대�
                "의뢰일자", "제조일자", "유효기한", "의뢰 특이사항",
                "결과원문", "저장숫자원값", "규칙적용값", "뺀까닭", "의뢰번호",
                "REQUEST_ID", "ORDER_ID", "TESTITEM_ID", "차수", "순번", "적부", "재시험",
-               "시험종류코드"]
+               "시험종류코드", "값해석", "LOQ"]
 
 
 def _rows_to_csv(rows: list[dict], fields: list[str]) -> str:
@@ -312,7 +343,7 @@ ORDER BY ITEM_CD
 def _view_csv(params: dict) -> str:
     """조회 결과 CSV — 인메모리 TTL 캐시. 같은 params 재조회는 즉시(네트워크 생략)."""
     # 'v2': 규칙 칸이 없는 예전 디스크 임시 저장분을 읽지 않게 하는 판 표시.
-    key = "v3|" + "|".join(f"{k}={v}" for k, v in sorted(params.items()))
+    key = "v4|" + "|".join(f"{k}={v}" for k, v in sorted(params.items()))
     now = time.time()
     with _LOCK:
         hit = _DATA_CACHE.get(key)
@@ -367,33 +398,65 @@ def fetch_oot_rows_for_types(test_types: list[str]) -> list[dict]:
     params = {f"tt{i}": t for i, t in enumerate(test_types)}
     placeholders = ", ".join(f":{k}" for k in params)
     sql = _OOT_CTE_ALARM + f"""
-, scored AS (
-  SELECT *,
-    avg(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, GROUP_NM, TESTITEM_NM) AS MEAN_VALUE,
-    stddev_samp(RULE_VALUE) OVER (PARTITION BY ITEM_CD, BIZPROCESS_NM, GROUP_NM, TESTITEM_NM) AS STDDEV_VALUE
-  FROM ruled
-  WHERE RULE_VALUE IS NOT NULL AND ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
-    AND BIZPROCESS_NM IN ({placeholders})
-)
-SELECT *, (RULE_VALUE - MEAN_VALUE) / nullif(STDDEV_VALUE, 0) AS Z_SCORE FROM scored
-WHERE abs((RULE_VALUE - MEAN_VALUE) / nullif(STDDEV_VALUE, 0)) > 2
+SELECT ITEM_CD, ITEM_NM, LOT_NO, BIZPROCESS_NM, GROUP_NM, TESTITEM_NM, RULE_VALUE,
+       RESULT_TEXT, RESULT_YN, EXCLUDED_REASON, REQUEST_NO
+FROM ruled
+WHERE ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
+  AND BIZPROCESS_NM IN ({placeholders})
+  AND (RULE_VALUE IS NOT NULL OR (coalesce(EXCLUDED_REASON, '') IN ('', '거짓 0')
+       AND coalesce(RESULT_TEXT, '') <> '' AND length(RESULT_TEXT) <= 200))
 """
-    rows = dbx.query(sql, params)
+    # 조각 단위로 읽으며 계산에 필요한 값만 남긴다 — 전 이력을 dict 로 한꺼번에 들고 있지 않게(메모리, 웹과 같은 컨테이너).
+    groups: dict[tuple, list] = {}
+    names: dict[tuple, str] = {}
+    for r in dbx.query_iter(sql, params):
+        nm, grp = r.get("TESTITEM_NM") or "", r.get("GROUP_NM") or ""
+        st = rp.stage_of(nm)
+        if st is not None and st >= 2:
+            continue                                   # 2차 이상은 트렌딩 제외(진입 이벤트는 화면)
+        reason, yn = r.get("EXCLUDED_REASON") or "", r.get("RESULT_YN") or ""
+        loq, censored = None, False
+        if r.get("RULE_VALUE") is not None:
+            v = float(r["RULE_VALUE"])
+        elif reason == "거짓 0" and not _FALSE_ZERO_USE_TEXT:
+            continue
+        elif yn == "A" and st != 1:
+            continue                                   # 적부 N/A 원문은 다단계 1차 결과만 읽는다
+        else:
+            v, kind, loq = rp.parse_result(r.get("RESULT_TEXT"), nm, grp)
+            if v is None:
+                continue
+            censored = kind in rp.CENSORED_KINDS
+        tt = r.get("BIZPROCESS_NM") or ""
+        key = (r.get("ITEM_CD"), tt, grp, nm)
+        names.setdefault(key, r.get("ITEM_NM") or "")
+        req = str(r.get("REQUEST_NO") or "") if "안정성" in tt else ""
+        groups.setdefault(key, []).append((v, censored, loq, sys.intern(str(r.get("LOT_NO") or "")),
+                                           yn == "A", sys.intern(req)))
     out = []
-    for r in rows:
-        z = r.get("Z_SCORE")
-        az = abs(float(z)) if z is not None else None
-        label = "관리이탈 (±3σ 초과)" if (az is not None and az > 3) else "주의 (±2σ~±3σ)"
-        mean_v, sd_v = r.get("MEAN_VALUE"), r.get("STDDEV_VALUE")
-        out.append({
-            "시험종류": r.get("BIZPROCESS_NM") or "", "품목": r.get("ITEM_NM") or "",
-            "품목코드": r.get("ITEM_CD") or "", "제조번호": r.get("LOT_NO") or "",
-            "대분류": r.get("GROUP_NM") or "", "시험항목": r.get("TESTITEM_NM") or "",
-            "LOT결과_0제외": "" if r.get("RULE_VALUE") is None else str(r["RULE_VALUE"]),
-            "OOT_구간분류_히트맵": label,
-            "확인_평균": "" if mean_v is None else str(round(float(mean_v), 4)),
-            "확인_표준편차": "" if sd_v is None else str(round(float(sd_v), 4)),
-        })
+    for key, items in groups.items():
+        # D-4 잠정(화면 apply_d4 와 같은 규칙): 같은 로트(안정성은 같은 의뢰)에 적부 N/A 가 아닌 값이 있으면
+        # 적부 N/A 값은 뺀다. 제조번호가 빈 줄은 그대로.
+        has_other = {(x[3], x[5]) for x in items if not x[4] and x[3].strip()}
+        items = [x for x in items if not (x[4] and x[3].strip() and (x[3], x[5]) in has_other)]
+        stt = _base_stats([x[0] for x in items])
+        if not stt or not stt[3]:
+            continue
+        mean_v, _sd_raw, _R, sd_v = stt
+        loqs = [x[2] for x in items if x[2] is not None]
+        loq = max(loqs) if loqs else None
+        item_cd, tt, grp, nm = key
+        for v, censored, _l, lot, _na, _req in items:
+            z = rp.judge_z((v - mean_v) / sd_v, v, loq, censored)
+            az = abs(z)
+            if az <= 2:
+                continue
+            out.append({
+                "시험종류": tt or "", "품목": names.get(key, ""), "품목코드": item_cd or "", "제조번호": lot,
+                "대분류": grp, "시험항목": nm, "LOT결과_0제외": str(round(v, 6)),
+                "OOT_구간분류_히트맵": "관리이탈 (±3σ 초과)" if az > 3 else "주의 (±2σ~±3σ)",
+                "확인_평균": str(round(mean_v, 4)), "확인_표준편차": str(round(sd_v, 4)),
+            })
     return out
 
 
@@ -666,14 +729,13 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
         # 적용 → 1단위 차이 ≈ 1σ. 연속(잘 분해된) 데이터는 R이 작아 자동 무효(완제품 등 영향 없음).
         for (gr, it), grp in pdf.groupby(["대분류", "시험항목"]):
             # 값 순서로 더한다 — 조회 줄 순서가 실행마다 달라도(병렬 조회) 평균·σ 끝자리가 같게(같은 자료 = 같은 판)
-            vals = sorted(grp.loc[grp["_sd_t"] > 0, "_v"].dropna().tolist())
+            vals = grp.loc[grp["_sd_t"] > 0, "_v"].dropna().tolist()
             n = len(vals)
-            mu = float(np.mean(vals)) if n >= 2 else float("nan")
-            sd_raw = float(np.std(vals, ddof=1)) if n >= 2 else float("nan")
-            uniq = sorted(set(vals))
-            R = min((b - a for a, b in zip(uniq, uniq[1:])), default=0.0)   # 분해능
-            sd = max(sd_raw, R) if (n >= 2 and not np.isnan(sd_raw)) else sd_raw
-            base[(str(gr), str(it))] = {"mu": mu, "sd": sd, "sd_raw": sd_raw, "R": R, "n": n}
+            stt = _base_stats(vals)
+            mu, sd_raw, R, sd = stt if stt else (float("nan"), float("nan"), 0.0, float("nan"))
+            loqs = [x for x in (grp["LOQ"].map(_num) if "LOQ" in grp.columns else []) if x == x]
+            loq = max(loqs) if loqs else None                              # 정량한계(결과의 '<x' 에서)
+            base[(str(gr), str(it))] = {"mu": mu, "sd": sd, "sd_raw": sd_raw, "R": R, "n": n, "loq": loq}
             sample_base[(str(gr), str(it))] = {"n": n}
 
         keys = list(zip(pdf["대분류"].astype(str), pdf["시험항목"].astype(str)))
@@ -684,12 +746,19 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
         # ── 판정: 단일점(±3σ/±2σ) + 관리도 연속 규칙(Western Electric Rule 2·3) ──
         # Rule1: 1점 >3σ = 관리이탈 · Rule2: 연속 3점 중 2점 >2σ(동일방향) = 경향이탈
         # Rule3: 연속 5점 중 4점 >1σ(동일방향) = 경향이탈. 시계열은 제조번호(로트) 오름차순.
-        status_map = {}
+        status_map, z_map = {}, {}
         for _key, grp in pdf.groupby(["대분류", "시험항목"]):
             q = grp[(grp["_sd"] > 0) & grp["_v"].notna() & grp["_mu"].notna()]
             q = q.sort_values(["_ord", "_rowkey"], kind="mergesort")   # 시간순, 같으면 줄 열쇠순(안정 정렬)
             idx = q.index.tolist()
             zs = ((q["_v"] - q["_mu"]) / q["_sd"]).tolist()
+            # 판정 z: 불검출·정량한계 미만은 이탈로 보지 않고, OOT 상한 = max(μ+kσ, LOQ)(rp.judge_z)
+            _loq = base.get((str(_key[0]), str(_key[1])), {}).get("loq")
+            _cens = (q["값해석"].astype(str).isin(rp.CENSORED_KINDS).tolist() if "값해석" in q.columns
+                     else [False] * len(zs))
+            zs = [rp.judge_z(z, v, _loq, c) for z, v, c in zip(zs, q["_v"].tolist(), _cens)]
+            for ix, z in zip(idx, zs):
+                z_map[ix] = z
             r2, r3 = _we_run_rules(zs)
             for k, ix in enumerate(idx):
                 z, az, tags = zs[k], abs(zs[k]), []
@@ -709,6 +778,7 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
                 if tags:
                     rule_tags[ix] = tags
         pdf["_상태"] = pdf.index.map(lambda i: status_map.get(i, "데이터부족"))
+        pdf["_z"] = pdf.index.map(lambda i: z_map.get(i, float("nan")))
 
     # 줄마다 기준선 정보(σ 원값·표본 수)와 연속 규칙 태그를 붙인다 — 로트 묶기·넘김 파일용.
     keys = list(zip(pdf["대분류"].astype(str), pdf["시험항목"].astype(str)))
@@ -716,6 +786,7 @@ def judge_rows(pdf: pd.DataFrame, year: Optional[str] = None) -> tuple[pd.DataFr
     pdf["_base_n"] = pd.Series([sample_base[k]["n"] if k in sample_base else None for k in keys],
                                index=pdf.index, dtype=object)
     pdf["_rules"] = pd.Series([rule_tags.get(i, []) for i in pdf.index], index=pdf.index, dtype=object)
+    pdf["_loq"] = pd.Series([base.get(k, {}).get("loq") for k in keys], index=pdf.index, dtype=object)
     return pdf, {"name": name, "years": years, "sample_info": sample_info}
 
 
@@ -733,7 +804,17 @@ def lots_from_judged(pdf: pd.DataFrame) -> list[dict]:
         normal = int((judged["_상태"] == "정상").sum())
         qual = int(len(g) - len(judged))
         def _item(r):
-            z = (r["_v"] - r["_mu"]) / r["_sd"] if r["_sd"] else float("nan")
+            d = _item_core(r)
+            loq = r.get("_loq")
+            if loq is not None and loq == loq:
+                d["loq"] = loq                             # OOT 상한 = max(μ+3σ, LOQ)
+            kind = str(r.get("값해석") or "")
+            if kind and kind != "숫자":
+                d["valKind"] = kind                        # 숫자+단위·불검출·정량한계미만·여러값평균
+            return d
+
+        def _item_core(r):
+            z = r["_z"] if "_z" in r else ((r["_v"] - r["_mu"]) / r["_sd"] if r["_sd"] else float("nan"))
             it = str(r.get("시험항목", ""))
             spec_lo, spec_hi = parse_criterion(r.get("시험기준"))   # 규격 하한·상한(관리도 기준선용)
             sd_raw = r["_sd_raw"]
@@ -782,11 +863,87 @@ def oot_lot_summary(code: str, test_type: str = "완제품", year: Optional[str]
     judged, info = judge_rows(kept, year)
     lots = lots_from_judged(judged)
     excluded, per_lot = _excluded_summary(dropped, year)
+    events, entered = stage_events(pdf)
     for lot in lots:
         lot["excluded"] = per_lot.get(lot["lot"], {})
-    return {"code": code, "name": info["name"], "lots": lots,
-            "years": ["전체"] + info["years"], "sampleInfo": info["sample_info"],
-            "excluded": excluded, "ruleNote": RULE_NOTE}
+        if entered.get(lot["lot"]):
+            lot["stageEntered"] = entered[lot["lot"]]
+    out = {"code": code, "name": info["name"], "lots": lots,
+           "years": ["전체"] + info["years"], "sampleInfo": info["sample_info"],
+           "excluded": excluded, "ruleNote": RULE_NOTE}
+    if events:
+        out["stageEvents"] = events
+    return out
+
+
+_SD_EPS = 1e-9             # 이보다 작은 σ(상대)는 0 — 같은 값들의 부동소수 찌꺼기
+
+
+def _base_stats(vals: list) -> Optional[tuple]:
+    """(μ, σ원값, 분해능 R, 판정 σ) — 화면(judge_rows)·넘김·알람이 같은 계산을 쓴다. 표본 2개 미만이면 None.
+
+    - σ 는 표본 표준편차(ddof=1). 값이 모두 같을 때의 부동소수 찌꺼기 σ 는 0.
+    - 판정 σ = max(σ원값, R). R(서로 다른 값의 최소 간격)은 서로 다른 값이 3개 이상일 때만 — 보고값 반올림으로
+      σ 가 분해능보다 작아져 1단위 차이가 3σ 로 과대 판정되는 것을 막고, {0(불검출), 76} 처럼 두 값뿐인
+      '처음 검출'은 그대로 이탈로 잡는다.
+    """
+    vals = sorted(float(v) for v in vals)          # 값 순서로 더한다 — 줄 순서가 달라도 끝자리까지 같게
+    n = len(vals)
+    if n < 2:
+        return None
+    mu = float(np.mean(vals))
+    sd_raw = float(np.std(vals, ddof=1))
+    if sd_raw < _SD_EPS * max(1.0, abs(mu)):
+        sd_raw = 0.0
+    uniq = sorted(set(vals))
+    R = min((b - a for a, b in zip(uniq, uniq[1:])), default=0.0) if len(uniq) >= 3 else 0.0
+    return mu, sd_raw, R, max(sd_raw, R)
+STAGE_RECENT = 10          # 최근 10배치
+STAGE_MAX_IN_RECENT = 2    # 그중 2배치 이상 2차 진입 → 이벤트
+
+
+def stage_events(pdf: pd.DataFrame) -> tuple[list, dict]:
+    """다단계 시험의 2차 이상 진입을 이벤트형 OOT 로 본다(1차 결과 트렌딩과 별개).
+
+    규칙: 최근 10배치 중 2배치 이상 진입, 또는 연속 2배치 진입. 진입 = 2차 이상 단계 항목에 실제 결과가
+    있음(적부 N/A·빈 결과가 아님). 반환: ([이벤트], {제조번호: [진입한 시험 이름]}).
+    """
+    if pdf.empty or "시험항목" not in pdf.columns:
+        return [], {}
+    names = pdf["시험항목"].astype(str)
+    st = names.map(rp.stage_of)
+    fams = {rp.stage_family(n) for n in names[st.notna()]}
+    if not fams:
+        return [], {}
+    # 단계 표기가 있는 줄 + 표기 없이 이름이 가족 이름과 같은 1차 줄(그 로트도 '시험한 로트'로 센다)
+    plain1 = st.isna() & names.isin(fams)
+    sub = pdf[st.notna() | plain1].copy()
+    sub["_stage"] = st[sub.index].fillna(1).astype(int)
+    sub["_fam"] = sub["시험항목"].astype(str).map(lambda n: rp.stage_family(n) if rp.stage_of(n) else n)
+    date_col = "의뢰일자" if "의뢰일자" in sub.columns else None
+    sub["_ord"] = ((sub[date_col].astype(str) + "|") if date_col else "") + sub["제조번호"].astype(str)
+    yn = sub["적부"].astype(str) if "적부" in sub.columns else pd.Series("", index=sub.index)
+    txt = sub["결과원문"] if "결과원문" in sub.columns else pd.Series("", index=sub.index)
+    sub["_entered"] = (sub["_stage"] >= 2) & (yn != "A") & ~txt.map(rp.is_blank_result)
+    events, entered_by_lot = [], {}
+    for fam, g in sub.groupby("_fam"):
+        per_lot = g.groupby(g["제조번호"].astype(str)).agg(ord=("_ord", "min"), entered=("_entered", "any"))
+        per_lot = per_lot[per_lot.index.str.strip() != ""].sort_values("ord")
+        for lot in per_lot.index[per_lot["entered"]]:
+            entered_by_lot.setdefault(lot, []).append(fam)
+        recent = per_lot.tail(STAGE_RECENT)
+        flags = recent["entered"].tolist()
+        n_in = int(sum(flags))
+        consec = any(a and b for a, b in zip(flags, flags[1:]))
+        rules = []
+        if n_in >= STAGE_MAX_IN_RECENT:
+            rules.append(f"최근 {len(flags)}배치 중 {n_in}배치 2차 이상 진입")
+        if consec:
+            rules.append("연속 2배치 2차 이상 진입")
+        if rules:
+            events.append({"family": fam, "rules": rules, "recentLots": len(flags),
+                           "enteredLots": [l for l, f in zip(recent.index.tolist(), flags) if f]})
+    return events, entered_by_lot
 
 
 def apply_d4(pdf: pd.DataFrame, test_type: str) -> pd.DataFrame:

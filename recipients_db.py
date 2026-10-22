@@ -63,7 +63,7 @@ def seed_from_roster() -> list[dict]:
 
 def load_db() -> list[dict]:
     """마스터 DB 로드. 없으면 명부에서 시드(없으면 빈 목록)."""
-    data = storage_io.read_json(DB_PATH)
+    data = storage_io.read_json_strict(DB_PATH)     # 읽기 오류면 예외(빈 명단으로 시드해 덮어쓰지 않게)
     if data is None:
         return seed_from_roster()
     # 정규화: name/email 키만, 이메일 중복 제거

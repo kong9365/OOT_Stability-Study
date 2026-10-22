@@ -62,11 +62,14 @@ class GroupStore:
     def __init__(self, path):
         self.path = Path(path)
 
-    def _read(self) -> dict:
+    def _read(self, strict: bool = False) -> dict:
+        """strict=True(저장·삭제 직전)면 읽기 오류를 예외로 — 빈 값으로 보고 다른 품목군을 지우지 않게."""
+        if strict:
+            return storage_io.read_json_strict(self.path, default={}) or {}
         return storage_io.read_json(self.path, default={}) or {}
 
     def save_group(self, group_id: str, group_name: str, member_codes: list[str]) -> ItemGroup:
-        data = self._read()
+        data = self._read(strict=True)
         data[group_id] = asdict(
             ItemGroup(
                 group_id=group_id,
@@ -86,7 +89,7 @@ class GroupStore:
         return [ItemGroup(**g) for g in self._read().values()]
 
     def delete_group(self, group_id: str) -> bool:
-        data = self._read()
+        data = self._read(strict=True)
         if group_id not in data:
             return False
         del data[group_id]
