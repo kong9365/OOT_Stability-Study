@@ -64,6 +64,34 @@ _LOCK = threading.Lock()
 # 조회 결과(CSV 텍스트) 인메모리 TTL 캐시 — 같은 params 반복 조회를 네트워크 없이 즉시 반환.
 _DATA_CACHE: dict[str, tuple[str, float]] = {}   # key -> (csv_text, wall_ts)
 _CACHE_TTL = float(os.getenv("KDP_CACHE_TTL_SEC", "300"))
+# 캐시 글 전체 상한. 넘으면 오래된 것부터 지운다 — 웹·알람·넘김(새벽 약 360MB)이 한 1GiB 컨테이너를 같이 쓴다.
+# 한글이 든 파이썬 글은 한 글자에 2바이트라, 메모리 MB 를 글자 수로 바꿀 때 절반으로 센다(기본 약 120MB).
+def _cache_max_chars() -> int:
+    try:
+        mb = float(os.getenv("KDP_CACHE_MAX_MB", "120"))
+    except ValueError:
+        mb = 120.0                      # 값이 잘못돼도 웹 기동은 막지 않는다
+    if not mb > 0:
+        mb = 120.0
+    return int(mb * 1_000_000 / 2)
+
+
+_CACHE_MAX_CHARS = _cache_max_chars()
+
+
+def _prune_cache_locked(now: float) -> None:
+    """만료된 항목을 지우고 상한을 넘으면 오래된 것부터 지운다(_LOCK 안에서 부른다).
+    만료 항목을 읽을 때 건너뛰기만 하면 메모리에는 계속 남아 재시작 때까지 쌓인다(11-09·11-10 메모리 초과)."""
+    for k in [k for k, (_t, ts) in _DATA_CACHE.items() if now - ts >= _CACHE_TTL]:
+        del _DATA_CACHE[k]
+    total = sum(len(t) for t, _ts in _DATA_CACHE.values())
+    if total <= _CACHE_MAX_CHARS:
+        return
+    for k, (t, _ts) in sorted(_DATA_CACHE.items(), key=lambda kv: kv[1][1]):
+        if total <= _CACHE_MAX_CHARS:
+            break
+        del _DATA_CACHE[k]
+        total -= len(t)
 # 디스크 영속 캐시 — 서버 재시작 후에도 이전 조회 데이터를 즉시 재사용(Databricks 재조회 생략).
 _CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".kdp_data_cache.pkl.gz")
 
@@ -96,6 +124,8 @@ def _load_cache_disk() -> int:
                 if (now - ts) < _CACHE_TTL:
                     _DATA_CACHE[k] = (text, ts)
                     n += 1
+            _prune_cache_locked(now)            # 상한을 낮춘 뒤 다시 시작해도 바로 지킨다
+            n = min(n, len(_DATA_CACHE))
         return n
     except Exception:
         return 0
@@ -350,8 +380,12 @@ def _view_csv(params: dict) -> str:
         if hit and (now - hit[1] < _CACHE_TTL):
             return hit[0]
     text = _fetch_csv(params)                       # 네트워크는 락 밖에서(병렬 조회 허용)
+    if len(text) > _CACHE_MAX_CHARS:                # 상한보다 큰 하나는 담지 않는다(넣으면 캐시가 통째로 비워짐)
+        return text
     with _LOCK:
-        _DATA_CACHE[key] = (text, time.time())
+        now = time.time()
+        _DATA_CACHE[key] = (text, now)
+        _prune_cache_locked(now)
     _save_cache_disk()                              # 재시작 후에도 재사용되도록 디스크 저장
     return text
 
@@ -1300,7 +1334,10 @@ def _stability_schedule(code: str, test_type: str) -> Optional[list]:
             return hit[1]
     rows = _fetch_stability_schedule(code, test_type)
     with _LOCK:
-        _SCHED_CACHE[key] = (time.time(), rows)
+        now = time.time()
+        for k in [k for k, (ts, _r) in _SCHED_CACHE.items() if now - ts >= _SCHED_TTL]:
+            del _SCHED_CACHE[k]                     # 만료 항목은 지운다(쌓이지 않게)
+        _SCHED_CACHE[key] = (now, rows)
     return rows
 
 

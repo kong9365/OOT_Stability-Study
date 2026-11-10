@@ -43,7 +43,7 @@ def build(rows=None, now=None):
     by = {r["T"]: r["M"] for r in q(oot_export.FRESH_SQL)}
     now = now or at_kst(3, 50)
     as_of, fresh = oot_export.freshness(by, now)
-    return oot_export.build(q, by, as_of, fresh, now)
+    return oot_export.build(q, by, as_of, fresh, now, keep_jsonl=True)
 
 
 def parse(jsonl: bytes) -> list[dict]:

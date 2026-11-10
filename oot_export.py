@@ -68,7 +68,8 @@ _WHERE = "BIZPROCESS_NM = :tt AND ITEM_CD IS NOT NULL"
 # D-4 잠정은 이 조회문(_OOT_CTE)이 낸다. 화면·엑셀은 공통 조회문에 창 함수를 넣지 않고 kdp_core.apply_d4 로
 # 같은 규칙을 낸다 — 시험(넘김 줄 상태 = 화면 상태)이 둘을 견준다.
 COUNT_SQL = core._OOT_CTE + f"SELECT count(*) AS N FROM ruled WHERE {_WHERE}"
-ROWS_SQL = core._OOT_CTE + f"SELECT {_COLS} FROM ruled WHERE {_WHERE}"
+# 품목코드순 — 넘김은 품목코드 하나씩 계산하며 흘려 읽는다(메모리, 웹과 같은 1GiB 컨테이너)
+ROWS_SQL = core._OOT_CTE + f"SELECT {_COLS} FROM ruled WHERE {_WHERE} ORDER BY ITEM_CD"
 LINE_FIELDS = (
     "item_cd", "item_nm", "test_type_cd", "test_type", "lot_no", "lot_blank", "lot_date",
     "request_date", "request_no", "request_id", "order_id", "testitem_id", "order_seq",
@@ -239,27 +240,93 @@ def _line(r, tt: str, excluded: bool) -> dict:
     return out
 
 
+def _code_lines(krows: list[dict], tt: str) -> list[dict]:
+    """한 품목코드의 한글 줄 → 넘김 줄. 화면과 같은 CSV 변환·같은 계산(judge_rows, 연도 '전체')."""
+    text = core._rows_to_csv(krows, core._FULL_FIELDS)
+    pdf = pd.DataFrame(list(csv.DictReader(io.StringIO(text))))
+    pdf = core.apply_d4(pdf, tt)               # 화면과 같은 D-4(원문 해석 값까지 본다)
+    kept, dropped = core.split_excluded(pdf)
+    judged, _info = core.judge_rows(kept, None)
+    return [_line(r, tt, False) for _, r in judged.iterrows()] + [_line(r, tt, True) for _, r in dropped.iterrows()]
+
+
 def lines_for(rows: list[dict], tt: str) -> list[dict]:
-    """한 시험종류의 조회 줄 → 넘김 줄. 화면과 같은 CSV 변환·같은 계산(품목코드마다 judge_rows, 연도 '전체')."""
+    """한 시험종류의 조회 줄 → 넘김 줄(품목코드마다 계산)."""
     by_code: dict[str, list] = {}
     for r in rows:
         k = core._row_to_korean(r)
         by_code.setdefault(k["품목코드"], []).append(k)
     out = []
     for code in sorted(by_code):
-        text = core._rows_to_csv(by_code[code], core._FULL_FIELDS)
-        pdf = pd.DataFrame(list(csv.DictReader(io.StringIO(text))))
-        pdf = core.apply_d4(pdf, tt)               # 화면과 같은 D-4(원문 해석 값까지 본다)
-        kept, dropped = core.split_excluded(pdf)
-        judged, _info = core.judge_rows(kept, None)
-        out += [_line(r, tt, False) for _, r in judged.iterrows()]
-        out += [_line(r, tt, True) for _, r in dropped.iterrows()]
+        out += _code_lines(by_code[code], tt)
     return out
+
+
+def _stream_code_lines(rows, tt: str):
+    """품목코드순(ROWS_SQL 의 ORDER BY)으로 오는 줄을 품목코드 하나씩 계산해 낸다 — 시험종류 전체를 메모리에 들지 않는다.
+    (원본 줄 수, 넘김 줄 목록)을 품목코드마다 낸다. 끝난 품목코드가 다시 나오면 순서가 깨진 것이라 멈춘다."""
+    done: set = set()
+    code, buf, n = None, [], 0
+    for r in rows:
+        k = core._row_to_korean(r)
+        if k["품목코드"] != code:
+            if buf:
+                yield n, _code_lines(buf, tt)
+            if k["품목코드"] in done:
+                raise RuntimeError(f"{tt}: 품목코드 순서가 깨졌습니다({k['품목코드']}) — 판을 만들지 않습니다")
+            done.add(code)
+            code, buf, n = k["품목코드"], [], 0
+        buf.append(k)
+        n += 1
+    if buf:
+        yield n, _code_lines(buf, tt)
+
+
+def _rows_by_code(query, tt: str, rows_iter=None):
+    """rows_iter(흘려 읽기 함수, 운영은 databricks_client.query_iter)가 있으면 조각 단위 흐름으로,
+    없으면(시험·오프라인) 받은 목록을 품목코드로 묶어서."""
+    if rows_iter is not None:
+        yield from _stream_code_lines(rows_iter(ROWS_SQL, {"tt": tt}), tt)
+        return
+    rows = query(ROWS_SQL, {"tt": tt}, large=True)
+    by_code: dict[str, list] = {}
+    for r in rows:
+        k = core._row_to_korean(r)
+        by_code.setdefault(k["품목코드"], []).append(k)
+    del rows
+    for code in sorted(by_code):
+        yield len(by_code[code]), _code_lines(by_code.pop(code), tt)
 
 
 def _row_key(line: dict):
     return tuple((0, int(x), "") if x.isdigit() else (1, 0, x)
                  for x in (line["request_id"], line["order_id"], line["testitem_id"]))
+
+
+def _key_bytes(line: dict) -> bytes:
+    """_row_key 와 같은 순서를 내는 바이트 머리 — 줄마다 튜플을 들고 있지 않으려고(줄 글 하나로 정렬).
+    숫자는 b"0"+자릿수(3자리)+숫자, 그 밖은 b"1"+글+b"\\0". 머리끼리 겹치지 않아 (머리+줄 글) 비교 = (열쇠, 줄 글) 비교."""
+    out = bytearray()
+    for x in (line["request_id"], line["order_id"], line["testitem_id"]):
+        if x.isdigit():
+            d = str(int(x)).encode()
+            out += b"0" + b"%03d" % len(d) + d
+        else:
+            if "\0" in x:
+                raise RuntimeError("열쇠 값에 NUL 글자가 있어 정렬할 수 없습니다 — 판을 만들지 않습니다")
+            out += b"1" + x.encode("utf-8") + b"\0"
+    return bytes(out)
+
+
+def _key_len(b: bytes) -> int:
+    """_key_bytes 머리의 길이(머리+줄 글에서 줄 글이 시작하는 자리)."""
+    p = 0
+    for _ in range(3):
+        if b[p] == 0x30:                       # b"0"
+            p += 4 + int(b[p + 1:p + 4])
+        else:
+            p = b.index(b"\0", p + 1) + 1
+    return p
 
 
 def code_sha256(root: str = _HERE) -> str:
@@ -271,38 +338,60 @@ def code_sha256(root: str = _HERE) -> str:
     return h.hexdigest()
 
 
-def build(query, by_table: dict, as_of: str, fresh: dict, now: datetime):
-    """조회 → (줄 파일 바이트(LF), gzip 바이트, 머리표). 받은 줄 수가 센 줄 수와 다르면 멈춘다."""
-    lines, counts, codes = [], {}, []
+def build(query, by_table: dict, as_of: str, fresh: dict, now: datetime, keep_jsonl: bool = False,
+          rows_iter=None):
+    """조회 → (줄 파일 바이트(LF) — keep_jsonl 일 때만, 아니면 None · gzip 바이트 · 머리표).
+    받은 줄 수가 센 줄 수와 다르면 멈춘다. 줄은 만들자마자 바이트 글로 바꿔 두고(사전은 버림) 압축까지 흘려 보낸다 —
+    웹·알람과 같은 1GiB 컨테이너에서 도는 일이라 전체를 여러 벌 들고 있지 않는다.
+    rows_iter 를 주면 줄 조회는 그 함수로 흘려 읽는다(run_once 가 운영에서 databricks_client.query_iter 를 넘김)."""
+    texts: list = []                                   # 정렬 머리 + 줄 글 바이트(줄마다 bytes 하나)
+    counts, codes, excluded = {}, [], {}
+    floor_changed = trend = 0
     for tt in TEST_TYPES:
         n_src = int(query(COUNT_SQL, {"tt": tt})[0]["N"])
-        rows = query(ROWS_SQL, {"tt": tt}, large=True)
-        if len(rows) != n_src:
-            raise RuntimeError(f"{tt}: 받은 줄 수 {len(rows)} 가 센 줄 수 {n_src} 와 다릅니다")
-        got = lines_for(rows, tt)
-        del rows
-        counts[tt] = {"rows": len(got), "source_rows": n_src}
-        codes.append({"cd": next((x["test_type_cd"] for x in got if x["test_type_cd"]), ""), "name": tt})
-        lines += got
-    # 줄 열쇠순, 같으면 글자순 — 같은 자료면 언제나 같은 파일
-    texts = sorted((_row_key(x), json.dumps(x, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-                   for x in lines)
-    jsonl = "".join(t + "\n" for _k, t in texts).encode("utf-8")
-    gz = gzip.compress(jsonl, compresslevel=9, mtime=0)
-    sha = hashlib.sha256(jsonl).hexdigest()
-    excluded: dict[str, int] = {}
-    for x in lines:
-        if x["excluded_reason"]:
-            excluded[x["excluded_reason"]] = excluded.get(x["excluded_reason"], 0) + 1
+        n_got = n_lines = 0
+        cd = ""
+        for n, got in _rows_by_code(query, tt, rows_iter):
+            n_got += n
+            n_lines += len(got)
+            for x in got:
+                cd = cd or x["test_type_cd"]
+                if x["excluded_reason"]:
+                    excluded[x["excluded_reason"]] = excluded.get(x["excluded_reason"], 0) + 1
+                if x["status"] in ("정상", "주의", "관리이탈") and x["status"] != x["status_decided"]:
+                    floor_changed += 1
+                if x["status"] == "경향이탈":
+                    trend += 1
+                texts.append(_key_bytes(x) + json.dumps(x, ensure_ascii=False, sort_keys=True,
+                                                        separators=(",", ":")).encode("utf-8"))
+        if n_got != n_src:
+            raise RuntimeError(f"{tt}: 받은 줄 수 {n_got} 가 센 줄 수 {n_src} 와 다릅니다")
+        counts[tt] = {"rows": n_lines, "source_rows": n_src}
+        codes.append({"cd": cd, "name": tt})
+    # 줄 열쇠순, 같으면 글자순(UTF-8 바이트 순서 = 글자 순서) — 같은 자료면 언제나 같은 파일
+    texts.sort()
+    h = hashlib.sha256()
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as gzf:
+        for kt in texts:
+            t = memoryview(kt)[_key_len(kt):]
+            h.update(t)
+            h.update(b"\n")
+            gzf.write(t)
+            gzf.write(b"\n")
+    gz = buf.getvalue()
+    buf.close()
+    del buf
+    jsonl = b"".join(kt[_key_len(kt):] + b"\n" for kt in texts) if keep_jsonl else None
+    n_rows = len(texts)
+    del texts
+    sha = h.hexdigest()
     meta = {
         "schema": SCHEMA, "export_id": sha[:12], "rows_sha256": sha,
         "gz_sha256": hashlib.sha256(gz).hexdigest(),
-        "row_count": len(lines), "source_row_count": sum(c["source_rows"] for c in counts.values()),
+        "row_count": n_rows, "source_row_count": sum(c["source_rows"] for c in counts.values()),
         "counts_by_test_type": counts, "excluded_counts": excluded,
-        "app_only_counts": {
-            "sd_floor_changed": sum(1 for x in lines if x["status"] in ("정상", "주의", "관리이탈")
-                                    and x["status"] != x["status_decided"]),
-            "trend": sum(1 for x in lines if x["status"] == "경향이탈")},
+        "app_only_counts": {"sd_floor_changed": floor_changed, "trend": trend},
         "app_commit": os.environ.get("APP_COMMIT", ""), "code_sha256": code_sha256(),
         "rule_version": RULE_VERSION,
         "rules": {"applied": ["D-3①", "D-3②", "D-3③", "D-3④", "쉼표 숫자(§4.4-1)", "D-4 잠정"],
@@ -350,7 +439,9 @@ def save_version(store, meta: dict, gz: bytes, keep: int = KEEP) -> bool:
 def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
              now_fn=now_utc, sleep_fn=time.sleep) -> dict:
     """한 번 시도하고 '마지막 시도' 상태를 남긴다(성공·실패 모두)."""
-    query = query or dbx.query
+    rows_iter = None
+    if query is None:                       # 운영: 줄 조회는 조각 단위로 흘려 읽는다(1GiB 안에 들게)
+        query, rows_iter = dbx.query, dbx.query_iter
     attempt = {"at": _iso(now_fn()), "ok": False, "reason": "", "data_as_of": "", "export_id": "",
                "new_version": False}
     try:
@@ -366,7 +457,7 @@ def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
                 attempt["reason"] = f"04:45 까지 자료 적재가 안 되어 이전 판을 그대로 둠 — {fresh['reason']}"
                 return _finish(store, attempt)
             sleep_fn(RETRY_SEC)
-        jsonl, gz, meta = build(query, by_table, as_of, fresh, now_fn())
+        jsonl, gz, meta = build(query, by_table, as_of, fresh, now_fn(), rows_iter=rows_iter)
         meta["storage"] = store.mode
         new = save_version(store, meta, gz, keep)
         attempt.update(ok=True, export_id=meta["export_id"], new_version=new, reason=fresh["reason"])
