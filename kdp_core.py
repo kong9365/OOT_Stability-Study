@@ -31,6 +31,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 import databricks_client as dbx
+import lims_snapshot
 import result_parse as rp
 from stability import analyze_dataframe, ci_bound  # 검증된 회귀 엔진 재사용
 
@@ -373,7 +374,8 @@ ORDER BY ITEM_CD
 def _view_csv(params: dict) -> str:
     """조회 결과 CSV — 인메모리 TTL 캐시. 같은 params 재조회는 즉시(네트워크 생략)."""
     # 'v2': 규칙 칸이 없는 예전 디스크 임시 저장분을 읽지 않게 하는 판 표시.
-    key = "v4|" + "|".join(f"{k}={v}" for k, v in sorted(params.items()))
+    body = "|".join(f"{k}={v}" for k, v in sorted(params.items()))
+    key = "v4|" + lims_snapshot.cache_tag() + body  # 사본 결과는 판 표시를 붙여 따로 담는다
     now = time.time()
     with _LOCK:
         hit = _DATA_CACHE.get(key)
@@ -382,6 +384,7 @@ def _view_csv(params: dict) -> str:
     text = _fetch_csv(params)                       # 네트워크는 락 밖에서(병렬 조회 허용)
     if len(text) > _CACHE_MAX_CHARS:                # 상한보다 큰 하나는 담지 않는다(넣으면 캐시가 통째로 비워짐)
         return text
+    key = "v4|" + lims_snapshot.answered_tag() + body  # 이번 조회에 실제로 답한 출처로 담는다
     with _LOCK:
         now = time.time()
         _DATA_CACHE[key] = (text, now)
@@ -1321,18 +1324,20 @@ def _fetch_stability_schedule(code: str, test_type: str) -> Optional[list]:
     import stability_schedule as _ss
     try:
         return list(dbx.query(_ss.query_sql(LIMS_CATALOG, PLANT_CD), {"code": code, "tt": test_type}))
-    except Exception:
+    except Exception as e:  # noqa: BLE001 — 값이 실릴 수 있어 종류만
+        print(f"[일정] 안정성 일정 조회 실패({type(e).__name__}) — 비고 기준으로 계속", flush=True)
         return None
 
 
 def _stability_schedule(code: str, test_type: str) -> Optional[list]:
-    key = (code, test_type)
+    key = (code, test_type, lims_snapshot.cache_tag())
     now = time.time()
     with _LOCK:
         hit = _SCHED_CACHE.get(key)
         if hit and now - hit[0] < _SCHED_TTL:
             return hit[1]
     rows = _fetch_stability_schedule(code, test_type)
+    key = (code, test_type, lims_snapshot.answered_tag())
     with _LOCK:
         now = time.time()
         for k in [k for k, (ts, _r) in _SCHED_CACHE.items() if now - ts >= _SCHED_TTL]:
@@ -1436,7 +1441,7 @@ def stability_df(code: str, test_type: str) -> pd.DataFrame:
     if conflicts:
         out.attrs["monthConflicts"] = conflicts
     if sched_rows:
-        out.attrs["lotSchedule"] = _ss.lot_schedule(sched_rows)
+        out.attrs["lotSchedule"] = _ss.lot_schedule(sched_rows, lims_snapshot.as_of_date())
     return out
 
 

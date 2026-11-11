@@ -37,7 +37,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const adminHdr = () => (S && S.adminToken ? { 'X-OOT-Admin': S.adminToken } : {});
 // 관리자 토큰이 만료·무효(재배포·8시간·비밀번호 변경)면 잠금 화면으로 돌려보낸다.
 function adminExpired(r) { if (r && r.status === 403) { S.adminToken = ''; S.alarmAuthed = false; return true; } return false; }
-async function getJSON(url) { const r = await fetch(url, { headers: adminHdr() }); if (r.status === 403 && S.adminToken) { S.adminToken = ''; S.alarmAuthed = false; } if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status); return r.json(); }
+async function getJSON(url) { const r = await fetch(url, { headers: adminHdr() }); if (r.status === 403 && S.adminToken) { S.adminToken = ''; S.alarmAuthed = false; } if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status); if (/^\/api\/(oot|stability|group)/.test(url)) { clearTimeout(S.sourceTimer); S.sourceTimer = setTimeout(refreshDataSource, 300); } return r.json(); }
 async function postJSON(url, body) { const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...adminHdr() }, body: JSON.stringify(body) }); if (!r.ok) { const j = await r.json().catch(() => ({})); const d = j.detail; return { ok: false, status: r.status, msg: (typeof d === 'string' ? d : (d ? '입력값을 확인하세요' : 'HTTP ' + r.status)) }; } return r.json(); }
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function fmt(n, d) { if (n == null || isNaN(n)) return '—'; return Number(n).toLocaleString('ko-KR', { minimumFractionDigits: d, maximumFractionDigits: d }); }
@@ -671,11 +671,28 @@ function renderOotCompChart() {
   if (fig) window.Plotly.newPlot(el, fig.data, fig.layout, fig.config);
 }
 
+function sourceLabel() {
+  const d = S.dataSource;
+  if (d && d.source === 'snapshot') {
+    const stale = d.stale ? ' · 오래된 자료입니다. PC에서 업데이트해 주세요' : '';
+    return `<span style="color:#E5310F;font-weight:600">PC 업로드 자료 기준: ${esc(String(d.data_as_of || '').slice(0, 16).replace('T', ' '))}${stale} · 자동 알람과 넘김은 멈춰 있습니다</span>`;
+  }
+  return `데이터 출처: Databricks <span style="font-family:${MONO}">광동제약_gmp_lims</span>(LIMS 수정판)`;
+}
+
+function refreshDataSource() {
+  getJSON('/api/data-source').then(d => {
+    const changed = JSON.stringify(d) !== JSON.stringify(S.dataSource);
+    S.dataSource = d;
+    if (changed) render();
+  }).catch(() => {});
+}
+
 function ootPage() {
   const nameColor = S.productName ? '#27303f' : '#b8c0cc';
   return `<div style="padding:26px 30px 60px;max-width:1320px;width:100%">
     ${pageHeader('광동제약 · 품질·시험', 'OOT 빠른 조회', 'Out Of Trend · LOT 판정',
-      `데이터 출처: Databricks <span style="font-family:${MONO}">광동제약_gmp_lims</span>(LIMS 수정판) · ${esc(S.ootTestType)} 온디맨드 조회`)}
+      `${sourceLabel()} · ${esc(S.ootTestType)} 온디맨드 조회`)}
     ${stepGuide(['시험종류 선택', '품목 검색·선택', '연도 선택', 'LOT·엑셀 확인'], S.code ? (S.lot ? 3 : 2) : 1)}
     <div style="background:#fff;border:1px solid #dfe4ec;border-radius:16px;box-shadow:0 1px 3px rgba(20,30,50,.05);position:relative;z-index:5">
       <div style="padding:18px 22px;display:flex;gap:22px;flex-wrap:wrap;align-items:flex-end">
@@ -927,7 +944,7 @@ function stabPage() {
   const head = `<div style="margin-bottom:20px">
     <div style="font-size:11.5px;font-weight:600;letter-spacing:.04em;color:#E5310F;margin-bottom:8px;display:flex;align-items:center;gap:9px">${eyebrow}</div>
     <h1 style="margin:0;font-size:26px;font-weight:700;letter-spacing:-.02em;display:flex;align-items:baseline;gap:11px">안정성 회귀분석<span style="color:#8a94a6;font-weight:500;font-size:15px">Shelf-life · ICH Q1E 유효기간</span></h1>
-    <div style="font-size:12.5px;color:#9aa4b4;margin-top:7px">데이터 출처: Databricks <span style="font-family:${MONO}">광동제약_gmp_lims</span>(LIMS 수정판) · <span style="font-family:${MONO}">의뢰 특이사항</span> → 시점(개월) · 함량 = <span style="font-family:${MONO}">LOT결과_0제외</span></div></div>`
+    <div style="font-size:12.5px;color:#9aa4b4;margin-top:7px">${sourceLabel()} · <span style="font-family:${MONO}">의뢰 특이사항</span> → 시점(개월) · 함량 = <span style="font-family:${MONO}">LOT결과_0제외</span></div></div>`
     + stepGuide(['시험종류·품목 선택', '규격·방식 설정', '결과·엑셀 확인'], (A && A.ok) ? 2 : (S.stabCode ? 1 : 0));
 
   const prodOptions = S.stabProducts.map(p => `<option value="${esc(p.code)}" ${p.code === S.stabCode ? 'selected' : ''}>${esc(p.code)}  ${esc(p.name)}</option>`).join('');
@@ -1552,6 +1569,7 @@ async function grpAnalyzeAll() {
   if (!items.length) {
     try {
       const r = await postJSON('/api/group/pooled_all', { codes, test_type: S.groupTestType, year });
+      refreshDataSource();
       if (r.detail) { S.groupResults = []; S.groupMsg = r.detail; }
       else { S.groupResults = r.results || []; S.groupMsg = S.groupResults.length ? '' : '풀링 가능한(유효 2건 이상) 시험항목이 없습니다.'; }
     } catch (e) { S.groupResults = []; S.groupMsg = '분석 실패: ' + e.message; }
@@ -1655,7 +1673,7 @@ function groupPage() {
   const cat = S.groupCatalog.length;
   const gtypes = ((typeof OOT_TEST_TYPES !== 'undefined' && OOT_TEST_TYPES.length > 1) ? OOT_TEST_TYPES : GROUP_TYPES).filter(t => !t.includes('안정성'));
   return `<div style="padding:26px 30px 60px;max-width:1100px;width:100%">
-    ${pageHeader('광동제약 · 품질·시험', 'APQR용 조회(참고용)', 'APQR · 풀링 OOT', 'APQR용 코드가 다른 동일 제품을 합쳐(pooling) 관리도·OOT를 봅니다 <span style="color:#dc2626;font-weight:800;font-size:15.5px">(GMP활용 금지)</span>')}
+    ${pageHeader('광동제약 · 품질·시험', 'APQR용 조회(참고용)', 'APQR · 풀링 OOT', 'APQR용 코드가 다른 동일 제품을 합쳐(pooling) 관리도·OOT를 봅니다 <span style="color:#dc2626;font-weight:800;font-size:15.5px">(GMP활용 금지)</span> · ' + sourceLabel())}
     ${stepGuide(['시험종류 선택', '유사품목 다중선택', '연도 선택', '전체 OOT·엑셀'], S.groupMembers.length ? ((S.groupResults.length || S.groupPooledLoading) ? 3 : 2) : 1)}
     <div style="display:flex;align-items:center;gap:8px;margin:-6px 0 16px;padding:11px 15px;background:#fff7ed;border:1px solid #fed7aa;border-radius:11px">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#c2660c" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
@@ -2013,4 +2031,5 @@ async function changePw() {
 
 /* ============================ INIT ============================ */
 loadOotProducts();
+setInterval(refreshDataSource, 300000);
 getJSON('/api/alarm/config').then(c => { S.alarm = c; if (S.nav === 'oot') render(); }).catch(() => {});

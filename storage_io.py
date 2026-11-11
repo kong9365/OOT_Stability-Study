@@ -219,3 +219,36 @@ def export_delete(name: str) -> None:
     path = os.path.join(_EXPORT_DIR, name)
     if os.path.exists(path):
         os.remove(path)
+
+
+# ── PC 가 올린 LIMS 사본(lims_snapshot) 읽기 — 읽기 전용, 정해진 이름 꼴만 ─────────────────
+_SNAPSHOT_PREFIX = "lims-snapshot/"
+_SNAPSHOT_NAME = re.compile(r"lims_latest\.json|lims_[0-9a-f]{12}\.duckdb\.gz")
+
+
+def _snapshot_key(name: str) -> str:
+    if not _SNAPSHOT_NAME.fullmatch(name or ""):
+        raise ValueError("사본 파일 이름이 아닙니다")
+    return _SNAPSHOT_PREFIX + name
+
+
+def snapshot_read(name: str) -> bytes | None:
+    """없거나 보관함이 S3 가 아니면 None."""
+    key = _snapshot_key(name)
+    if not _s3:
+        return None
+    try:
+        return _s3.get_object(Bucket=_BUCKET, Key=key)["Body"].read()
+    except Exception as e:  # noqa: BLE001
+        code = str(getattr(e, "response", {}).get("Error", {}).get("Code", ""))
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return None
+        raise StorageReadError(type(e).__name__) from None
+
+
+def snapshot_download(name: str, dest: str) -> None:
+    key = _snapshot_key(name)
+    if not _s3:
+        raise RuntimeError("보관함이 S3 가 아닙니다")
+    with open(dest, "wb") as f:
+        _s3.download_fileobj(_BUCKET, key, f)

@@ -157,7 +157,7 @@ def test_schedule_cache_drops_expired(monkeypatch):
     kdp_core._stability_schedule("A", "x")
     clock["t"] = kdp_core._SCHED_TTL + 1
     kdp_core._stability_schedule("B", "x")
-    assert list(kdp_core._SCHED_CACHE) == [("B", "x")]
+    assert list(kdp_core._SCHED_CACHE) == [("B", "x", "")]
 
 
 def test_cache_skips_oversized_and_prunes_on_disk_load(monkeypatch, tmp_path):

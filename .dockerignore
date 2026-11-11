@@ -27,10 +27,13 @@ watchdog.log
 sample_OOT_report.xlsx
 *.log
 oot_export_*
+*.duckdb
+*.duckdb.gz
 
 # === 개발·이 PC 전용 ===
 tests/
 offline_dbx.py
+lims_upload.py
 *.bat
 *.vbs
 *.ps1

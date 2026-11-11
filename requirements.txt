@@ -15,3 +15,5 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 # axhub 영속 스토리지(S3 호환) 연동(storage_io.py)
 boto3>=1.34.0
+# Databricks 가 막혔을 때 PC 업로드 사본을 읽는다(lims_snapshot.py)
+duckdb==1.4.1

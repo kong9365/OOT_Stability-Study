@@ -29,6 +29,10 @@ try:  # 사내망 SSL 검사 프록시 대응: OS 인증서 저장소 신뢰(검
 except ImportError:
     pass
 
+import lims_snapshot  # noqa: E402 — 인증서 주입 뒤에(보관함 모듈을 부른다)
+
+_END = object()
+
 HOST = os.environ.get("DATABRICKS_HOST", "https://dbc-6430e2d7-1523.cloud.databricks.com").rstrip("/")
 WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID", "ec6e1860e1e62aff")
 DEFAULT_PROFILE = "lims-sp"
@@ -171,7 +175,33 @@ def _raw_rows(resp: dict, large: bool):
         chunk = _request("GET", HOST + nxt)
 
 
+def _snapshot_after(e: Exception) -> bool:
+    """Databricks 가 403 으로 거절했고 PC 업로드 사본을 쓸 수 있으면 True. 다른 오류는 그대로 올린다."""
+    resp = getattr(e, "response", None)
+    return resp is not None and resp.status_code == 403 and lims_snapshot.activate()
+
+
 def query_iter(sql: str, params: dict | None = None):
+    """큰 결과를 조각 단위로 한 행씩 낸다. Databricks 가 막혀 있으면 PC 업로드 사본으로 답한다."""
+    if lims_snapshot.in_use():
+        yield from lims_snapshot.query_iter(sql, params)
+        return
+    rows = _databricks_iter(sql, params)
+    try:
+        first = next(rows, _END)
+    except requests.HTTPError as e:
+        if not _snapshot_after(e):
+            raise
+        yield from lims_snapshot.query_iter(sql, params)
+        return
+    lims_snapshot.mark_databricks()
+    if first is _END:
+        return
+    yield first
+    yield from rows
+
+
+def _databricks_iter(sql: str, params: dict | None = None):
     """큰 결과를 조각 단위로 한 행씩 낸다(EXTERNAL_LINKS) — 전부를 한꺼번에 메모리에 올리지 않는다."""
     resp = _statement(sql, params, True)
     sid = resp["statement_id"]
@@ -188,7 +218,21 @@ def query_iter(sql: str, params: dict | None = None):
 
 
 def query(sql: str, params: dict | None = None, large: bool = False) -> list[dict]:
-    """SQL 실행 후 행을 dict 목록으로 반환. 파라미터는 :name 마커 사용. 결과 25MB 초과 예상 시 large=True."""
+    """SQL 실행 후 행을 dict 목록으로 반환. Databricks 가 막혀 있으면 PC 업로드 사본으로 답한다."""
+    if lims_snapshot.in_use():
+        return lims_snapshot.query(sql, params, large)
+    try:
+        rows = _databricks_query(sql, params, large)
+        lims_snapshot.mark_databricks()
+        return rows
+    except requests.HTTPError as e:
+        if not _snapshot_after(e):
+            raise
+        return lims_snapshot.query(sql, params, large)
+
+
+def _databricks_query(sql: str, params: dict | None = None, large: bool = False) -> list[dict]:
+    """파라미터는 :name 마커 사용. 결과 25MB 초과 예상 시 large=True."""
     resp = _statement(sql, params, large)
     sid = resp["statement_id"]
     columns = resp["manifest"]["schema"]["columns"]

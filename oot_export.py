@@ -558,6 +558,7 @@ def main(argv=None) -> int:
     ap.add_argument("--offline", metavar="SNAPSHOT", help="오프라인 LIMS 사본으로 조회(DuckDB 필요, --out 과 함께)")
     ap.add_argument("--keep", type=int, default=KEEP, help=f"남길 판 수(기본 {KEEP})")
     a = ap.parse_args(argv)
+    dbx.lims_snapshot.disable()      # 넘김은 다른 앱이 받는 자료 — PC 업로드 사본으로 만들지 않는다
     query = None
     if a.offline:
         if not a.out:

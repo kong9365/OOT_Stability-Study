@@ -40,6 +40,7 @@ import storage_io  # noqa: E402
 import oot_mail  # noqa: E402
 import axhub_mail  # noqa: E402
 import kst  # noqa: E402
+import lims_snapshot  # noqa: E402
 
 STATE_PATH = os.path.join(_HERE, ".oot_alarm_state.json")
 KEY_MARK = "#keys-v2"                    # 발송 기록 열쇠를 새 꼴로 옮겼다는 표지(옛 코드는 무시)
@@ -303,6 +304,9 @@ def main():
     if os.getenv("OOT_ALARM_OFF", "").strip() == "1":
         _log("OOT 자동 알람 끔 — 끄는 스위치 OOT_ALARM_OFF=1")
         return
+
+    # 알람은 메일이 사람에게 나간다. PC 업로드 사본으로 판정하지 않는다(Databricks 만 본다).
+    lims_snapshot.disable()
 
     if a.reset_state:
         storage_io.remove(STATE_PATH)

@@ -27,6 +27,7 @@ from pydantic import BaseModel
 import kdp_core as core  # databricks_client(인증서 주입)를 보관함·메일 모듈보다 먼저
 import axhub_mail
 import kst
+import lims_snapshot
 import oot_export
 import oot_group
 import oot_mail
@@ -173,6 +174,14 @@ def api_oot_lots(code: str, test_type: str = Query("완제품"), year: Optional[
         _fail(e, "LOT 데이터 로드 실패")
 
 
+def _source_suffix() -> str:
+    """PC 업로드 사본으로 만든 엑셀은 파일 이름만 봐도 알게 한다."""
+    s = lims_snapshot.status()
+    if s["source"] != "snapshot":
+        return ""
+    return "_PC업로드자료_" + str(s.get("data_as_of", ""))[:10].replace("-", "")
+
+
 @app.get("/api/oot/excel")
 def api_oot_excel(code: str, test_type: str = Query("완제품"), year: Optional[str] = None):
     """OOT 조회(연도 필터 반영) → 첨부 양식 엑셀(.xlsx) 다운로드."""
@@ -184,7 +193,7 @@ def api_oot_excel(code: str, test_type: str = Query("완제품"), year: Optional
         _fail(e, "Excel 생성 실패")
     from fastapi import Response
     ytag = f"_{year}" if (year and year != "전체") else ""
-    fn = f"OOT_리포트_{code}{ytag}.xlsx"
+    fn = f"OOT_리포트_{code}{ytag}{_source_suffix()}.xlsx"
     quoted = urllib.parse.quote(fn)
     return Response(content=data,
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -236,7 +245,7 @@ def api_stability_excel(code: str,
     except Exception as e:
         _fail(e, "Excel 생성 실패")
     from fastapi import Response
-    fn = f"안정성_분석결과_{code}.xlsx"
+    fn = f"안정성_분석결과_{code}{_source_suffix()}.xlsx"
     quoted = urllib.parse.quote(fn)
     return Response(content=data,
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -366,7 +375,7 @@ def api_group_excel(codes: str = Query(""), test_type: str = Query("완제품"),
         _fail(e, "Excel 생성 실패")
     from fastapi import Response
     ytag = f"_{year}" if (year and year != "전체") else ""
-    fn = f"APQR_리포트{ytag}.xlsx"
+    fn = f"APQR_리포트{ytag}{_source_suffix()}.xlsx"
     quoted = urllib.parse.quote(fn)
     return Response(content=data,
                     media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -766,6 +775,12 @@ def _startup_export_schedule():
 _STARTED = time.time()
 _ALARM_STALE_SEC = 10 * 60      # 알람 프로세스의 별도 스레드가 30초마다 표시 — 10분 끊기면 프로세스가 죽은 것
 _ALARM_GRACE_SEC = 180          # 기동 직후 유예
+
+
+@app.get("/api/data-source")
+def api_data_source():
+    """화면 안내용 — 지금 답이 Databricks 인지 PC 업로드 사본인지(개인정보·경로 없음, 상태 변경 없음)."""
+    return lims_snapshot.status()
 
 
 @app.get("/api/health")
