@@ -350,6 +350,113 @@ def _days_ago(n):
     return (kst.now().date() - timedelta(days=n)).isoformat()
 
 
+def _stab(lot, req, updated):
+    return {**_cand(lot, updated), "시험종류": F.TT_LT, "의뢰번호": req}
+
+
+def _stab_run(run, monkeypatch):
+    import oot_mail
+    monkeypatch.setattr(oot_mail, "load_config", lambda **kw: {
+        "enabled": True, "policy": "관리이탈만", "recipient_groups": {F.TT_LT: ["qa@example.invalid"]}})
+
+
+def _req_of(run):
+    return [r["의뢰번호"] for recs, _ in run.sent for r in recs]
+
+
+def test_stability_next_time_point_is_new(run, monkeypatch):
+    _stab_run(run, monkeypatch)
+    t3 = _stab("S1", "R-3M", _days_ago(1))
+    run([t3])
+    assert _req_of(run) == ["R-3M"]
+    run([t3, _stab("S1", "R-6M", _days_ago(0))])           # 같은 로트·항목·상태의 다음 시점
+    assert _req_of(run) == ["R-6M"]
+    run([t3, _stab("S1", "R-6M", _days_ago(0))])
+    assert run.sent == []
+
+
+def _v2_state(run, *extra):
+    import oot_alarm
+    import storage_io
+    v2 = "|".join([F.TT_LT, F.P1, "S1", "g", "i", "관리이탈"])
+    storage_io.write_json(run.path, [oot_alarm.KEY_MARK, oot_alarm.PARSE_MARK, v2, *extra])
+    return v2
+
+
+def test_stability_migration_mails_only_later_recent_points(run, monkeypatch):
+    import oot_alarm
+    _stab_run(run, monkeypatch)
+    v2 = _v2_state(run)                                     # ee28910 까지: 3개월 시점을 보낸 기록(시점 없는 열쇠)
+    pts = [_stab("S1", "R-3M", _days_ago(40)), _stab("S1", "R-6M", _days_ago(2))]
+    run(pts)
+    assert _req_of(run) == ["R-6M"]                         # 막혀 있던 뒤 시점만
+    st = run.state()
+    assert oot_alarm.STAB_MARK in st and v2 in st
+    assert f"{v2}|R-3M" in st and f"{v2}|R-6M" in st
+    run(pts)
+    assert run.sent == []                                   # 한 번만
+
+
+def test_stability_migration_does_not_resend_first_point(run, monkeypatch):
+    _stab_run(run, monkeypatch)
+    _v2_state(run)
+    run([_stab("S1", "R-3M", _days_ago(2)), _stab("S1", "R-6M", _days_ago(1))])
+    assert _req_of(run) == ["R-6M"]                         # 가장 이른 시점은 이미 보낸 것으로 본다
+
+
+def test_stability_migration_old_points_send_nothing(run, monkeypatch):
+    _stab_run(run, monkeypatch)
+    _v2_state(run)
+    run([_stab("S1", "R-3M", _days_ago(90)), _stab("S1", "R-6M", _days_ago(30))])
+    assert run.sent == []
+
+
+def test_stability_migration_runs_once(run, monkeypatch):
+    import oot_alarm
+    _stab_run(run, monkeypatch)
+    _v2_state(run, oot_alarm.STAB_MARK)                     # 이미 옮김 — 옛 열쇠로 다시 막지 않는다
+    run([_stab("S1", "R-3M", _days_ago(2))])
+    assert _req_of(run) == ["R-3M"]
+
+
+def test_stability_migration_keeps_held_points(run, monkeypatch):
+    import oot_alarm
+    import storage_io
+    _stab_run(run, monkeypatch)
+    v2 = "|".join([F.TT_LT, F.P1, "S1", "g", "i", "관리이탈"])
+    storage_io.write_json(run.path, [oot_alarm.KEY_MARK, oot_alarm.PARSE_MARK, oot_alarm.HELD_MARK + v2])
+    run([_stab("S1", "R-3M", _days_ago(30))])               # 못 보내 미뤄 둔 건 — 기준일보다 오래돼도 보낸다
+    assert _req_of(run) == ["R-3M"]
+    assert oot_alarm.HELD_MARK + f"{v2}|R-3M" not in run.state()
+
+
+def test_stability_send_records_rollback_forms(run, monkeypatch):
+    _stab_run(run, monkeypatch)
+    run([_stab("S1", "R-3M", _days_ago(0))])
+    st = run.state()
+    v2 = "|".join([F.TT_LT, F.P1, "S1", "g", "i", "관리이탈"])
+    v1 = "|".join([F.TT_LT, F.P1, "S1", "i", "관리이탈"])
+    assert {f"{v2}|R-3M", v2, v1} <= st                      # ee28910·a4ef25c 로 되돌려도 다시 안 보냄
+
+
+def test_non_stability_key_unchanged(run):
+    run([_cand("N", _days_ago(0))])
+    assert "|".join([F.TT_FIN, F.P1, "N", "g", "i", "관리이탈"]) in run.state()
+
+
+def test_alarm_rows_carry_request_no_for_stability_only(monkeypatch):
+    import kdp_core
+    def rows(tt, req):
+        base = [{"ITEM_CD": F.P1, "ITEM_NM": F.P1_NAME, "LOT_NO": f"L{i}", "BIZPROCESS_NM": tt, "GROUP_NM": "g",
+                 "TESTITEM_NM": "i", "RULE_VALUE": 100.0 + (i % 3) * 0.1, "RESULT_TEXT": "", "RESULT_YN": "Y",
+                 "EXCLUDED_REASON": "", "REQUEST_NO": f"Q{i}", "RESULT_UPDATE_TIME": "2026-01-01"} for i in range(20)]
+        return base + [{**base[0], "LOT_NO": "BAD", "RULE_VALUE": 200.0, "REQUEST_NO": req}]
+    for tt, want in ((F.TT_LT, "R-6M"), (F.TT_FIN, "")):
+        monkeypatch.setattr(kdp_core.dbx, "query_iter", lambda sql, params=None, _r=rows(tt, "R-6M"): iter(_r))
+        out = kdp_core.fetch_oot_rows_for_types([tt])
+        assert [o["의뢰번호"] for o in out if o["제조번호"] == "BAD"] == [want]
+
+
 def test_past_result_not_mailed(run):
     assert run([_cand("OLD", _days_ago(8)), _cand("NEW", _days_ago(0)), _cand("EDGE", _days_ago(7))]) == ["NEW", "EDGE"]
 

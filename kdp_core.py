@@ -488,7 +488,7 @@ WHERE ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
         loqs = [x[2] for x in items if x[2] is not None]
         loq = max(loqs) if loqs else None
         item_cd, tt, grp, nm = key
-        for v, censored, _l, lot, _na, _req, updated in items:
+        for v, censored, _l, lot, _na, req, updated in items:
             z = rp.judge_z((v - mean_v) / sd_v, v, loq, censored)
             az = abs(z)
             if az <= 2:
@@ -498,6 +498,7 @@ WHERE ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
                 "대분류": grp, "시험항목": nm, "LOT결과_0제외": str(round(v, 6)),
                 "OOT_구간분류_히트맵": "관리이탈 (±3σ 초과)" if az > 3 else "주의 (±2σ~±3σ)",
                 "확인_평균": str(round(mean_v, 4)), "확인_표준편차": str(round(sd_v, 4)), "수정일": updated,
+                "의뢰번호": req,                       # 안정성만(시점마다 의뢰가 따로), 그 밖은 빈 값
             })
     return out
 

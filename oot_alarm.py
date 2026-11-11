@@ -61,6 +61,7 @@ KEY_MARK = "#keys-v2"                    # 발송 기록 열쇠를 새 꼴로 �
 PARSE_MARK = "#parse-v1"
 LAST_OK_MARK = "#last-ok:"                # 끝까지 점검한 마지막 날(발송 기록 안의 표지)
 HELD_MARK = "#held:"                      # 발송 실패 상한으로 미뤄 둔 열쇠(보내면 지운다)
+STAB_MARK = "#keys-v3-stab"               # 안정성 열쇠에 시점(의뢰번호)을 넣었다는 표지(한 번만 옮김)
 KEY_MODE = os.getenv("OOT_ALARM_KEY_MODE", "migrate").strip().lower()
 LOG_PATH = os.path.join(_HERE, "oot_alarm.log")
 DASH_URL = os.getenv("OOT_DASHBOARD_URL", "http://localhost:8502")
@@ -201,6 +202,39 @@ def _mail_cutoff(state: set) -> str:
     return cutoff.isoformat()
 
 
+def _migrate_stability(state: set, cur: dict, v2_of: dict, cutoff: str) -> None:
+    """안정성 열쇠에 시점을 넣은 뒤 첫 실행 — 이미 보낸 시점이 다시 메일로 나가지 않게 한 번만 옮긴다.
+
+    예전 열쇠(시점 없음)가 기록에 있으면, 그 로트·항목에서 처음 메일로 나간 시점은 알 수 없지만 가장 먼저
+    수정된 시점일 것이다(뒤 시점은 그 열쇠에 막혀 보내지 못했다). 그래서 가장 이른 시점과 기준일보다 오래된
+    시점만 본 것으로 적고, 기준일 뒤에 수정된 나머지 시점은 그대로 두어 이번 실행에서 메일로 나가게 한다.
+
+    한계(2026-11-11 운영 자료로 확인): 처음 메일로 나간 시점이 지금 후보에서 빠졌거나, 한 번에 여러 시점이
+    처음 들어왔으면 이 추정이 틀릴 수 있다. 운영 자료에서는 해당 12묶음이 모두 시점 하나뿐이었고 발송 이력과
+    맞았다(1건은 보낸 값과 같고, 11건은 기준일 전). 이 판보다 앞선 판으로 되돌렸다가 다시 올릴 때는 상태 파일에서
+    STAB_MARK 를 지워 옮김을 다시 돌려야 한다(그 사이 예전 판이 보낸 시점이 다시 나가지 않게).
+    """
+    by_v2: dict = {}
+    held = set()
+    for k, v2 in v2_of.items():
+        if k == v2 or k not in cur:
+            continue
+        if v2 in state:
+            by_v2.setdefault(v2, []).append(k)
+        elif HELD_MARK + v2 in state:    # 못 보내 미뤄 둔 예전 열쇠 — 그 시점들도 기준일과 상관없이 대상으로 남긴다
+            held.add(HELD_MARK + k)
+    add = set()
+    for keys in by_v2.values():
+        keys.sort(key=lambda k: (cur[k]["수정일"], k))
+        add.add(keys[0])
+        add.update(k for k in keys[1:] if cur[k]["수정일"] < cutoff)
+    left = sum(len(v) for v in by_v2.values()) - len(add)
+    state.update(add | held)
+    state.add(STAB_MARK)
+    _save_quietly(state)                 # 못 적어도 다음 실행이 같은 결과로 다시 옮긴다(보낸 건은 메모리가 막음)
+    _log(f"안정성 열쇠에 시점을 넣음 — 이미 본 시점 {len(add)}건 기록, 그 뒤 시점 {left}건은 이번에 새 건으로 봄")
+
+
 def _save_quietly(state: set) -> None:
     try:
         save_state(state)
@@ -266,20 +300,25 @@ def check_once() -> bool:
 
     cur = {}
     old_of = {}                          # 새 열쇠 -> 옛 꼴 열쇠(대분류 없음, a4ef25c)
+    v2_of = {}                           # 안정성 시점 열쇠 -> 시점 없는 열쇠(ee28910 까지의 꼴)
     for r in candidates:
         status = _oot_status(r.get("OOT_구간분류_히트맵"))
         if status not in targets:
             continue
         tt = r.get("시험종류", "")
-        key = "|".join([tt, r.get("품목코드", ""), r.get("제조번호", ""), r.get("대분류", ""),
-                        r.get("시험항목", ""), status])
+        v2 = "|".join([tt, r.get("품목코드", ""), r.get("제조번호", ""), r.get("대분류", ""),
+                       r.get("시험항목", ""), status])
+        req = str(r.get("의뢰번호") or "")
+        # 안정성은 같은 로트·항목이 시점(의뢰)마다 다시 시험된다 — 시점을 열쇠에 넣어야 다음 시점의 OOT 도 새 건이다.
+        key = f"{v2}|{req}" if req else v2
+        v2_of[key] = v2
         old_of[key] = "|".join([tt, r.get("품목코드", ""), r.get("제조번호", ""), r.get("시험항목", ""),
                                 status])
         if key in cur and r.get("수정일", "") < cur[key]["수정일"]:
             continue                     # 같은 열쇠면 가장 최근에 수정된 결과를 메일에 싣는다
         cur[key] = {"시험종류": tt, "품목": r.get("품목", ""), "품목코드": r.get("품목코드", ""),
                     "제조번호": r.get("제조번호", ""), "대분류": r.get("대분류", ""),
-                    "시험항목": r.get("시험항목", ""),
+                    "시험항목": r.get("시험항목", ""), "의뢰번호": req,
                     "결과값": r.get("LOT결과_0제외", ""), "분류": r.get("OOT_구간분류_히트맵", ""),
                     "평균": r.get("확인_평균", ""), "표준편차": r.get("확인_표준편차", ""),
                     "수정일": r.get("수정일", "")}
@@ -291,8 +330,13 @@ def check_once() -> bool:
         return False
     if state is not None:
         state |= _mailed
+    # 되돌려도 메일이 몰리지 않게 기록할 때는 옛 꼴 둘(대분류 없음 · 시점 없음)을 함께 적는다.
+    def _forms(keys):
+        keys = set(keys)
+        return keys | {old_of[k] for k in keys} | {v2_of[k] for k in keys}
+
     if state is None:                    # 처음 실행
-        save_state(set(cur) | set(old_of.values()) | {KEY_MARK, PARSE_MARK})
+        save_state(_forms(cur) | {KEY_MARK, PARSE_MARK, STAB_MARK})
         _log(f"초기 기준선 설정: 현재 OOT {len(cur)}건 기록(발송 안함). 이후 신규분만 발송. "
              f"[대상={'/'.join(sorted(targets))}]")
         return True
@@ -302,13 +346,16 @@ def check_once() -> bool:
         state.add(PARSE_MARK)
         save_state(state)
     elif PARSE_MARK not in state:        # 값 해석 확장 뒤 첫 실행 — 한 번만, 보내지 않음
-        state.update(set(cur) | set(old_of.values()))
+        state.update(_forms(cur))
         state.add(PARSE_MARK)
+        state.add(STAB_MARK)             # 지금 후보를 모두 기준선으로 적었으니 시점 옮김도 끝난 것
         save_state(state)
         _log(f"결과 원문 해석 확장 — 현재 OOT {len(cur)}건을 기준선으로 기록(이번에는 발송 안 함). "
              "다음 실행부터 신규분만 발송. 기록한 건(앞 20): "
              + ", ".join(sorted(f"{v['품목코드']}/{v['제조번호']}/{v['시험항목']}" for v in cur.values())[:20]))
         return True
+    if STAB_MARK not in state:           # 안정성 시점 열쇠 첫 실행 — 한 번만
+        _migrate_stability(state, cur, v2_of, _mail_cutoff(state))
     new_keys = [k for k in cur if k not in state]
     # 옛 결과가 새 결과 때문에 평균·σ가 움직여 재판정된 건은 메일에서 뺀다. 기록하지 않으므로
     # 그 결과를 LIMS 에서 고치거나 재시험해 수정일이 새로워지면 다시 메일 대상이 된다. 화면에는 그대로 보인다.
@@ -342,8 +389,7 @@ def check_once() -> bool:
     # 수신자 미지정 시험종류는 기준선 처리: 본 것으로 기록해 다음 주기 재감지·로그반복을 막는다.
     # (추후 해당 종류에 수신자를 지정하면, 그 시점 이후 '신규' 건부터 발송됨)
     if skipped_keys:
-        state.update(skipped_keys)
-        state.update(old_of[k] for k in skipped_keys)   # 되돌려도 다시 보내지 않게 옛 꼴도 기록
+        state.update(_forms(skipped_keys))              # 되돌려도 다시 보내지 않게 옛 꼴도 기록
         save_state(state)
 
     # 보낼 대상이 하나도 없으면 인터넷 확보(포털 로그인)조차 하지 않고 종료 — 헛도는 인터넷 켜기 방지
@@ -379,7 +425,7 @@ def check_once() -> bool:
                 _hold(state, keys)
 
     if sent_keys:
-        done = set(sent_keys) | {old_of[k] for k in sent_keys}      # 되돌려도 다시 보내지 않게 옛 꼴도 기록
+        done = _forms(sent_keys)                                    # 되돌려도 다시 보내지 않게 옛 꼴도 기록
         _mailed.update(done)
         state.update(done)
         state.difference_update(HELD_MARK + k for k in sent_keys)
