@@ -675,7 +675,7 @@ function sourceLabel() {
   const d = S.dataSource;
   if (d && d.source === 'snapshot') {
     const stale = d.stale ? ' · 오래된 자료입니다. PC에서 업데이트해 주세요' : '';
-    return `<span style="color:#E5310F;font-weight:600">PC 업로드 자료 기준: ${esc(String(d.data_as_of || '').slice(0, 16).replace('T', ' '))}${stale} · 자동 알람과 넘김은 멈춰 있습니다</span>`;
+    return `<span style="color:#E5310F;font-weight:600">PC 업로드 자료 기준: ${esc(String(d.data_as_of || '').slice(0, 16).replace('T', ' '))}${stale} · 성적서 검토 앱 넘김은 멈춰 있습니다</span>`;
   }
   return `데이터 출처: Databricks <span style="font-family:${MONO}">광동제약_gmp_lims</span>(LIMS 수정판)`;
 }

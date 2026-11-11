@@ -305,4 +305,4 @@ def send_oot_alert(records: list[dict], cfg: dict[str, Any] | None = None,
                 pass
         return bool(ok), ("발송 성공" if ok else "발송 실패")
     except Exception as e:
-        return False, f"발송 오류: {e}"
+        return False, f"발송 오류: {type(e).__name__}"

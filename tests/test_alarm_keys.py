@@ -20,7 +20,7 @@ CRIT, WARN = "관리이탈 (±3σ 초과)", "주의 (±2σ~±3σ)"
 def cand(tt, lot, group, item, label):
     return {"시험종류": tt, "품목": F.P1_NAME, "품목코드": F.P1, "제조번호": lot, "대분류": group,
             "시험항목": item, "LOT결과_0제외": "1", "OOT_구간분류_히트맵": label,
-            "확인_평균": "0", "확인_표준편차": "1"}
+            "확인_평균": "0", "확인_표준편차": "1", "수정일": "2099-01-01"}
 
 
 A = cand(F.TT_FIN, "23010", "함량", "성분가", CRIT)
@@ -47,6 +47,7 @@ def alarm(tmp_path, monkeypatch):
     sent: list[list[dict]] = []
     box = {"cands": []}
     monkeypatch.setattr(storage_io, "_s3", None)
+    monkeypatch.setattr(oot_alarm, "_mailed", set())
     for mod in (oot_alarm, old):
         monkeypatch.setattr(mod, "STATE_PATH", state)
         monkeypatch.setattr(mod, "LOG_PATH", str(tmp_path / "oot_alarm.log"))

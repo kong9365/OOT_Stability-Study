@@ -207,7 +207,10 @@ def test_approved_only_switch(tmp_path):
             "g=\"tor.ORDER_STATUS = '90'\";"
             "assert g in k._COMMON_CTE and g in k._OOT_CTE and g in e.ROWS_SQL;"
             "assert 'ORDER_STATUS' not in k._OOT_CTE_ALARM;"
-            "assert k._OOT_CTE.replace(k._APPROVED_SQL, '') == k._OOT_CTE_ALARM;print('ok')")
+            "assert 'ttr.UPDATE_TIME AS RESULT_UPDATE_TIME' not in k._OOT_CTE;"
+                "c=k._RESULT_COLS;"
+                "assert k._OOT_CTE.replace(k._APPROVED_SQL, '').replace(c, c + ' ttr.UPDATE_TIME AS RESULT_UPDATE_TIME,', 1)"
+                " == k._OOT_CTE_ALARM;print('ok')")
     env = {**os.environ, "OOT_APPROVED_ONLY": "1", "PYTHONIOENCODING": "utf-8"}
     for k in ("STORAGE_ENDPOINT", "STORAGE_BUCKET", "STORAGE_ACCESS_KEY", "STORAGE_SECRET_KEY"):
         env.pop(k, None)

@@ -205,7 +205,7 @@ def main() -> int:
     _prune(s3, bucket, key)
     print(f"\n완료: {built[:16].replace('T', ' ')} 기준 자료를 올렸습니다.")
     print(f"LIMS 자료 기준 시각: {info['data_as_of'][:16].replace('T', ' ')}")
-    print("앱 화면은 Databricks 가 막혀 있는 동안 몇 분 안에 이 자료로 바뀝니다. 알람 메일과 성적서 검토 앱 넘김은 이 자료를 쓰지 않습니다.")
+    print("Databricks 가 막혀 있는 동안 앱 화면은 몇 분 안에, 알람은 약 30초 안에 이 자료로 점검합니다. 성적서 검토 앱 넘김은 이 자료를 쓰지 않습니다.")
     return 0
 
 

@@ -248,6 +248,10 @@ ruled AS (
 # 알람 전용: 승인 전 결과도 대상이다(2026-10-21 결정). 입력은 됐지만 아직 승인 안 된 이탈 값을 승인을
 # 기다리지 않고 바로 알리려는 것 — 승인 필터만 빼고 나머지(규칙 ①~④)는 _OOT_CTE 와 같다.
 _RESULTS_CTE_ALL = _RESULTS_CTE.replace(_APPROVED_SQL, "") if _APPROVED_SQL else _RESULTS_CTE
+# 알람만 결과의 LIMS 수정 시각을 더 본다 — 모집단 변화로 재판정된 옛 결과를 메일에서 빼려고.
+_RESULT_COLS = "ttr.RESULT_YN, ttr.RETEST_ITEM_YN,"
+assert _RESULT_COLS in _RESULTS_CTE_ALL
+_RESULTS_CTE_ALL = _RESULTS_CTE_ALL.replace(_RESULT_COLS, _RESULT_COLS + " ttr.UPDATE_TIME AS RESULT_UPDATE_TIME,", 1)
 _OOT_CTE_ALARM = _RESULTS_CTE_ALL + _OOT_CTE[len(_RESULTS_CTE):]
 
 # 조회문 규칙이 계산에서 뺀 줄의 까닭(서식 결과는 값이 원래 비어 있어 따로 떼지 않는다).
@@ -436,7 +440,7 @@ def fetch_oot_rows_for_types(test_types: list[str]) -> list[dict]:
     placeholders = ", ".join(f":{k}" for k in params)
     sql = _OOT_CTE_ALARM + f"""
 SELECT ITEM_CD, ITEM_NM, LOT_NO, BIZPROCESS_NM, GROUP_NM, TESTITEM_NM, RULE_VALUE,
-       RESULT_TEXT, RESULT_YN, EXCLUDED_REASON, REQUEST_NO
+       RESULT_TEXT, RESULT_YN, EXCLUDED_REASON, REQUEST_NO, RESULT_UPDATE_TIME
 FROM ruled
 WHERE ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
   AND BIZPROCESS_NM IN ({placeholders})
@@ -469,7 +473,8 @@ WHERE ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
         names.setdefault(key, r.get("ITEM_NM") or "")
         req = str(r.get("REQUEST_NO") or "") if "안정성" in tt else ""
         groups.setdefault(key, []).append((v, censored, loq, sys.intern(str(r.get("LOT_NO") or "")),
-                                           yn == "A", sys.intern(req)))
+                                           yn == "A", sys.intern(req),
+                                           sys.intern(str(r.get("RESULT_UPDATE_TIME") or "")[:10])))
     out = []
     for key, items in groups.items():
         # D-4 잠정(화면 apply_d4 와 같은 규칙): 같은 로트(안정성은 같은 의뢰)에 적부 N/A 가 아닌 값이 있으면
@@ -483,7 +488,7 @@ WHERE ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
         loqs = [x[2] for x in items if x[2] is not None]
         loq = max(loqs) if loqs else None
         item_cd, tt, grp, nm = key
-        for v, censored, _l, lot, _na, _req in items:
+        for v, censored, _l, lot, _na, _req, updated in items:
             z = rp.judge_z((v - mean_v) / sd_v, v, loq, censored)
             az = abs(z)
             if az <= 2:
@@ -492,7 +497,7 @@ WHERE ITEM_CD IS NOT NULL AND LOT_NO IS NOT NULL AND TESTITEM_NM IS NOT NULL
                 "시험종류": tt or "", "품목": names.get(key, ""), "품목코드": item_cd or "", "제조번호": lot,
                 "대분류": grp, "시험항목": nm, "LOT결과_0제외": str(round(v, 6)),
                 "OOT_구간분류_히트맵": "관리이탈 (±3σ 초과)" if az > 3 else "주의 (±2σ~±3σ)",
-                "확인_평균": str(round(mean_v, 4)), "확인_표준편차": str(round(sd_v, 4)),
+                "확인_평균": str(round(mean_v, 4)), "확인_표준편차": str(round(sd_v, 4)), "수정일": updated,
             })
     return out
 

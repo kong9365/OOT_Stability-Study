@@ -29,6 +29,7 @@ sample_OOT_report.xlsx
 oot_export_*
 *.duckdb
 *.duckdb.gz
+.oot_alarm_data_seen.json
 
 # 개인정보 명부·포털 진단 저장물·시험 찌꺼기(공개 저장소에 올리지 않는다)
 QMS_메일수신자_명부_*.md

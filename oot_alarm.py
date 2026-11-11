@@ -10,6 +10,10 @@ OOT 자동 알람 스케줄러 (독립 프로세스)
 ★ 첫 실행(상태파일 없음)은 현재 OOT 전체를 '기준선'으로만 기록하고 **발송하지 않는다**
   (과거 누적분 폭주 방지). 이후 새로 발생한 건만 발송한다.
 
+★ 언제 점검하나(2026-11-11): 정해진 시각에 오늘 적재분이 없으면 22:00까지 30분마다 다시 시도한다.
+  PC 업로드로 새 자료가 올라오면 약 30초 안에 바로 점검한다. 메일은 LIMS 수정일이 최근 7일 안인 결과만 보낸다
+  (점검을 며칠 못 했으면 마지막으로 끝까지 점검한 날 하루 전까지 넓혀 그 공백의 결과는 빠뜨리지 않는다).
+
 ★ 발송 기록 열쇠(2026-10-04): 대분류를 넣은 새 꼴(시험종류|품목코드|제조번호|대분류|시험항목|상태).
   예전 기록(대분류 없는 옛 꼴)은 새 코드 첫 실행에서 **한 번만** 옮긴다 — 표지 '#keys-v2'.
   옛 열쇠는 지우지 않고, 새로 기록하는 건마다 옛 꼴 열쇠도 함께 적어 예전 코드로 되돌려도
@@ -29,6 +33,7 @@ import os
 import sys
 import re
 import time
+from datetime import date, datetime, time as dtime, timedelta
 
 from dotenv import load_dotenv
 
@@ -41,12 +46,21 @@ import oot_mail  # noqa: E402
 import axhub_mail  # noqa: E402
 import kst  # noqa: E402
 import lims_snapshot  # noqa: E402
+import oot_export  # noqa: E402
 
 STATE_PATH = os.path.join(_HERE, ".oot_alarm_state.json")
+SEEN_PATH = os.path.join(_HERE, ".oot_alarm_data_seen.json")   # 알람이 마지막으로 본 PC 업로드 자료 기준 시각
+RECENT_DAYS = 7          # LIMS 수정일이 이 안인 결과만 메일(옛 결과가 모집단 변화로 재판정된 건은 뺀다)
+RETRY_SEC = 30 * 60      # 정해진 시각에 자료가 낡았으면 이 간격으로 다시 시도
+RETRY_UNTIL = dtime(22, 0)
+MAX_SEND_FAILS = 3       # 같은 날 발송 실패 상한(실패로 보여도 실제로는 도착했을 수 있어 끝없이 다시 보내지 않는다)
+BOOT_DELAY_SEC = 120     # 기동 직후에는 웹 준비와 메모리가 겹치지 않게 업로드 확인을 미룬다
 KEY_MARK = "#keys-v2"                    # 발송 기록 열쇠를 새 꼴로 옮겼다는 표지(옛 코드는 무시)
 # 결과 원문 해석(result_parse, 2026-10-22)으로 예전엔 못 읽던 과거 결과가 처음 계산에 들어온다 —
 # 그 첫 실행 한 번은 보내지 않고 기준선으로만 기록한다(과거 건 메일이 한꺼번에 몰리지 않게).
 PARSE_MARK = "#parse-v1"
+LAST_OK_MARK = "#last-ok:"                # 끝까지 점검한 마지막 날(발송 기록 안의 표지)
+HELD_MARK = "#held:"                      # 발송 실패 상한으로 미뤄 둔 열쇠(보내면 지운다)
 KEY_MODE = os.getenv("OOT_ALARM_KEY_MODE", "migrate").strip().lower()
 LOG_PATH = os.path.join(_HERE, "oot_alarm.log")
 DASH_URL = os.getenv("OOT_DASHBOARD_URL", "http://localhost:8502")
@@ -100,7 +114,7 @@ def _ensure_internet_before_send() -> bool:
     try:
         import network_gate  # 같은 폴더에 복사됨
     except Exception as e:
-        _log(f"network_gate 로드 실패 — 인터넷 확보 생략(발송 계속 시도): {e}")
+        _log(f"network_gate 로드 실패 — 인터넷 확보 생략(발송 계속 시도): {type(e).__name__}")
         return True
 
     cfg_path = os.getenv("NET_GATE_CONFIG") or _GATE_CONFIG
@@ -112,7 +126,7 @@ def _ensure_internet_before_send() -> bool:
         _log(f"인터넷 확보 {'성공' if ok else '실패'} (설정: {os.path.basename(cfg_path)})")
         return ok
     except Exception as e:
-        _log(f"인터넷 확보 중 예외(무시하고 발송 시도): {e}")
+        _log(f"인터넷 확보 중 예외(무시하고 발송 시도): {type(e).__name__}")
         return True
 
 
@@ -160,24 +174,94 @@ def _migrate_keys(state: set, cur: dict, old_of: dict) -> None:
     _log(f"발송 기록 열쇠 옮김 — {how}: 새 열쇠 {len(add)}건 더함 · 옛 열쇠는 그대로 둠")
 
 
-def check_once() -> None:
+_mailed: set = set()     # 이 프로세스가 보낸 열쇠 — 기록 저장이 실패해도 같은 메일을 다시 보내지 않는다
+_fails: dict = {}        # (날짜, 시험종류) -> 그날 발송 실패 횟수
+# 기록에 '끝까지 점검한 날' 표지가 아직 없을 때(이 표지를 처음 쓰는 배포)의 마지막 점검일. 운영 알람이
+# Databricks 403 으로 멈춘 날을 확인하지 못해, 넘김이 멈춘 10-26 전날로 넉넉히 잡는다 — 그 사이 결과를 빠뜨리지 않게.
+BOOTSTRAP_LAST_OK = date(2026, 10, 25)
+
+
+def _last_ok(state: set):
+    """끝까지 점검한 마지막 날. 없거나 깨졌으면 None."""
+    days = []
+    for k in state:
+        if k.startswith(LAST_OK_MARK):
+            try:
+                days.append(date.fromisoformat(k[len(LAST_OK_MARK):]))
+            except ValueError:
+                pass
+    return max(days, default=None)
+
+
+def _mail_cutoff(state: set) -> str:
+    """메일 대상 수정일의 하한. 점검을 며칠 못 했으면 그 공백의 결과가 빠지지 않게 그만큼 넓힌다."""
+    cutoff = kst.now().date() - timedelta(days=RECENT_DAYS)
+    last = _last_ok(state) or BOOTSTRAP_LAST_OK
+    cutoff = min(cutoff, last - timedelta(days=1))
+    return cutoff.isoformat()
+
+
+def _save_quietly(state: set) -> None:
+    try:
+        save_state(state)
+    except Exception as e:  # noqa: BLE001 — 값이 실릴 수 있어 종류만
+        _log(f"발송 기록을 저장하지 못함({type(e).__name__}) — 이 프로세스가 기억해 같은 메일을 다시 보내지 않음")
+
+
+def _hold(state: set, keys) -> None:
+    """발송 실패 상한으로 오늘 못 보낸 건을 표시한다 — 실패가 며칠 이어져도 7일 기준에 걸려 빠지지 않게."""
+    add = {HELD_MARK + k for k in keys} - state
+    if add:
+        state.update(add)
+        _save_quietly(state)
+
+
+def _finish(state: set) -> bool:
+    """끝까지 점검한 날을 기록한다(하루 한 번)."""
+    mark = f"{LAST_OK_MARK}{kst.now().date().isoformat()}"
+    if mark not in state:
+        state.difference_update({k for k in state if k.startswith(LAST_OK_MARK)})
+        state.add(mark)
+        _save_quietly(state)
+    return True
+
+
+def _send_blocked(tt: str) -> bool:
+    """이 시험종류의 오늘 발송 실패가 상한에 닿았는지(다른 시험종류는 막지 않는다)."""
+    return _fails.get((kst.now().date(), tt), 0) >= MAX_SEND_FAILS
+
+
+def _note_send_failure(tt: str) -> bool:
+    """발송 실패를 시험종류마다 센다. True 면 다시 시도, False 면 그 시험종류는 오늘 그만(내일 다시 대상)."""
+    global _fails
+    today = kst.now().date()
+    _fails = {k: v for k, v in _fails.items() if k[0] == today}
+    n = _fails[(today, tt)] = _fails.get((today, tt), 0) + 1
+    if n >= MAX_SEND_FAILS:
+        _log(f"  [{tt}] 오늘 발송 실패 {n}번 — 내일 다시 시도합니다")
+        return False
+    return True
+
+
+def check_once() -> bool:
+    """한 번 점검한다. 끝나면 True, 설정·자료·기록을 못 읽었거나 발송이 실패해 다시 시도해야 하면 False."""
     _beat()
     try:
         cfg = oot_mail.load_config(strict=True)
     except Exception as e:
         _log(f"알림 설정을 읽지 못해 이번 점검을 건너뜀({type(e).__name__}) — 다음 주기 재시도")
-        return
+        return False
     if not cfg.get("enabled", True):
         _log("알람 비활성화(enabled=false) — 건너뜀")
-        return
+        return True
     targets = {"관리이탈"} if cfg.get("policy", "관리이탈만") == "관리이탈만" else {"관리이탈", "주의"}
 
     # Databricks에서 전 시험종류를 한 번에 조회(±2σ 초과 후보, 평균·표준편차 포함).
     try:
         candidates = core.fetch_oot_rows_for_types(_alarm_types())
     except Exception as e:
-        _log(f"Databricks 조회 실패: {type(e).__name__}: {e}")
-        return
+        _log(f"LIMS 조회 실패: {type(e).__name__}")
+        return False
     _beat()
 
     cur = {}
@@ -191,22 +275,27 @@ def check_once() -> None:
                         r.get("시험항목", ""), status])
         old_of[key] = "|".join([tt, r.get("품목코드", ""), r.get("제조번호", ""), r.get("시험항목", ""),
                                 status])
+        if key in cur and r.get("수정일", "") < cur[key]["수정일"]:
+            continue                     # 같은 열쇠면 가장 최근에 수정된 결과를 메일에 싣는다
         cur[key] = {"시험종류": tt, "품목": r.get("품목", ""), "품목코드": r.get("품목코드", ""),
                     "제조번호": r.get("제조번호", ""), "대분류": r.get("대분류", ""),
                     "시험항목": r.get("시험항목", ""),
                     "결과값": r.get("LOT결과_0제외", ""), "분류": r.get("OOT_구간분류_히트맵", ""),
-                    "평균": r.get("확인_평균", ""), "표준편차": r.get("확인_표준편차", "")}
+                    "평균": r.get("확인_평균", ""), "표준편차": r.get("확인_표준편차", ""),
+                    "수정일": r.get("수정일", "")}
 
     try:
         state = load_state()
     except Exception as e:
         _log(f"발송 기록을 읽지 못해 이번 점검을 건너뜀({type(e).__name__}) — 다음 주기 재시도")
-        return
+        return False
+    if state is not None:
+        state |= _mailed
     if state is None:                    # 처음 실행
         save_state(set(cur) | set(old_of.values()) | {KEY_MARK, PARSE_MARK})
         _log(f"초기 기준선 설정: 현재 OOT {len(cur)}건 기록(발송 안함). 이후 신규분만 발송. "
              f"[대상={'/'.join(sorted(targets))}]")
-        return
+        return True
 
     if KEY_MARK not in state:            # 새 코드 첫 실행 — 한 번만
         _migrate_keys(state, cur, old_of)
@@ -219,11 +308,19 @@ def check_once() -> None:
         _log(f"결과 원문 해석 확장 — 현재 OOT {len(cur)}건을 기준선으로 기록(이번에는 발송 안 함). "
              "다음 실행부터 신규분만 발송. 기록한 건(앞 20): "
              + ", ".join(sorted(f"{v['품목코드']}/{v['제조번호']}/{v['시험항목']}" for v in cur.values())[:20]))
-        return
+        return True
     new_keys = [k for k in cur if k not in state]
+    # 옛 결과가 새 결과 때문에 평균·σ가 움직여 재판정된 건은 메일에서 뺀다. 기록하지 않으므로
+    # 그 결과를 LIMS 에서 고치거나 재시험해 수정일이 새로워지면 다시 메일 대상이 된다. 화면에는 그대로 보인다.
+    # 발송 실패 상한으로 미뤄 둔 건(HELD_MARK)은 기준일과 상관없이 다시 대상이다.
+    cutoff = _mail_cutoff(state)
+    past = [k for k in new_keys if cur[k]["수정일"] < cutoff and HELD_MARK + k not in state]
+    if past:
+        new_keys = [k for k in new_keys if k not in set(past)]
+        _log(f"과거 결과 재판정 {len(past)}건은 메일에서 제외(LIMS 수정일 {cutoff} 이전)")
     if not new_keys:
         _log(f"신규 OOT 없음 (현재 {len(cur)} · 이력 {len(state)} · 대상 {'/'.join(sorted(targets))})")
-        return
+        return _finish(state)
 
     _log(f"신규 OOT {len(new_keys)}건 감지 → 시험종류별 그룹 발송 시도")
     groups = cfg.get("recipient_groups") or {}
@@ -252,14 +349,23 @@ def check_once() -> None:
     # 보낼 대상이 하나도 없으면 인터넷 확보(포털 로그인)조차 하지 않고 종료 — 헛도는 인터넷 켜기 방지
     if not sendable:
         _log(f"  발송할 수신 그룹 없음 — 인터넷 확보/발송 생략 (기준선 {len(skipped_keys)}건 기록).")
-        return
+        return _finish(state)
+
+    for tt in [t for t in sendable if _send_blocked(t)]:
+        _log(f"  [{tt}] 오늘 발송 실패 상한에 닿아 보내지 않음 — 내일 다시 시도")
+        _hold(state, sendable.pop(tt))
+    if not sendable:
+        return _finish(state)
 
     _ensure_internet_before_send()  # 실제 발송 대상이 있을 때만 인터넷 확보(사내망 캡티브 포털 자동 통과)
     sent_keys: list[str] = []
+    retry = False
+    src = lims_snapshot.status()
+    src_note = f" · PC 업로드 자료 기준 {str(src.get('data_as_of', ''))[:16].replace('T', ' ')}" if src["source"] == "snapshot" else ""
     for tt, keys in sendable.items():
         grp = _grp(tt)
         recs = [cur[k] for k in keys]
-        subj = f"[OOT 알람] {tt} 신규 {len(recs)}건 ({kst.now():%Y-%m-%d %H:%M})"
+        subj = f"[OOT 알람] {tt} 신규 {len(recs)}건 ({kst.now():%Y-%m-%d %H:%M}){src_note}"
         ok, msg = oot_mail.send_oot_alert(recs, cfg=cfg, subject=subj,
                                           dashboard_url=DASH_URL, recipients=grp)
         if ok:
@@ -267,12 +373,93 @@ def check_once() -> None:
             _log(f"  ✅ [{tt}] {len(recs)}건 → {len(grp)}명 발송 성공")
         else:
             _log(f"  ⚠️ [{tt}] 발송 실패: {msg} (이력 미갱신 — 다음 주기 재시도)")
+            if _note_send_failure(tt):
+                retry = True
+            else:
+                _hold(state, keys)
 
     if sent_keys:
-        state.update(sent_keys)
-        state.update(old_of[k] for k in sent_keys)      # 되돌려도 다시 보내지 않게 옛 꼴도 기록
-        save_state(state)
+        done = set(sent_keys) | {old_of[k] for k in sent_keys}      # 되돌려도 다시 보내지 않게 옛 꼴도 기록
+        _mailed.update(done)
+        state.update(done)
+        state.difference_update(HELD_MARK + k for k in sent_keys)
+        _save_quietly(state)
         _log(f"발송 성공 {len(sent_keys)}건 · 이력 {len(state)}건으로 갱신")
+    # 상한에 닿아 오늘 그만둔 시험종류만 남았으면 오늘 점검은 끝난 것으로 본다(다음 날 기준일이 계속 넓어지지 않게).
+    return False if retry else _finish(state)
+
+
+def _data_fresh() -> bool:
+    """오늘 적재분이 있는지(Databricks 또는 PC 업로드 자료). 못 읽으면 예외."""
+    by_table = {str(r["T"]): r["M"] for r in core.dbx.query(oot_export.FRESH_SQL)}
+    _as_of, fresh = oot_export.freshness(by_table, oot_export.now_utc())
+    if not fresh["ok"]:
+        _log(f"자료가 낡음 — {fresh['reason']}")
+    return fresh["ok"]
+
+
+def _load_seen():
+    """마지막으로 본 업로드 기준 시각. (읽었는지, 값)"""
+    try:
+        d = storage_io.read_json_strict(SEEN_PATH)
+        return True, (d or {}).get("data_as_of")
+    except Exception as e:  # noqa: BLE001
+        _log(f"업로드 확인 기록을 읽지 못함({type(e).__name__})")
+        return False, None
+
+
+def _save_seen(as_of: str) -> None:
+    try:
+        storage_io.write_json(SEEN_PATH, {"data_as_of": as_of})
+    except Exception as e:  # noqa: BLE001 — 저장 실패는 재시작 뒤 한 번 더 점검할 뿐이다
+        _log(f"업로드 확인 기록을 저장하지 못함({type(e).__name__})")
+
+
+def _new_upload_as_of(seen):
+    """알람이 아직 안 본 새 업로드의 자료 기준 시각. 없으면 None."""
+    meta = lims_snapshot.latest_meta()
+    if not meta:
+        return None
+    as_of = meta["data_as_of"]
+    if seen:
+        try:
+            if datetime.fromisoformat(as_of) <= datetime.fromisoformat(seen):
+                return None
+        except (TypeError, ValueError):
+            pass
+    return as_of
+
+
+def _attempt() -> bool:
+    """자료가 오늘 것이면 점검한다. 점검을 끝내면 True. 끝나면 사본 연결을 놓는다."""
+    try:
+        if not _data_fresh():
+            return False
+        return bool(check_once())
+    finally:
+        lims_snapshot.release()
+
+
+def _check_upload() -> bool:
+    """새 업로드를 처리한다. True 면 본 것으로 기록(낡은 자료는 메일 없이 넘어감), False 면 잠시 뒤 다시."""
+    try:
+        return (not _data_fresh()) or bool(check_once())
+    except Exception as e:  # noqa: BLE001 — 값이 실릴 수 있어 종류만
+        _log(f"업로드 점검 오류: {type(e).__name__}")
+        return False
+    finally:
+        lims_snapshot.release()
+
+
+def _next_after_attempt(done: bool, dt: str, now_ts: float) -> float:
+    """매일 실행의 다음 시각: 끝났으면 내일, 못 끝냈으면 22:00까지 30분 뒤."""
+    if not done:
+        nxt = kst.now() + timedelta(seconds=RETRY_SEC)
+        if nxt.date() == kst.now().date() and nxt.time() <= RETRY_UNTIL:
+            _log(f"{nxt:%H:%M} 에 다시 시도합니다(22:00까지)")
+            return now_ts + RETRY_SEC
+        _log("22:00까지 새 자료가 없어 오늘 점검을 마칩니다")
+    return now_ts + _seconds_until_daily(dt)
 
 
 def _seconds_until_daily(hhmm: str) -> float:
@@ -305,9 +492,6 @@ def main():
         _log("OOT 자동 알람 끔 — 끄는 스위치 OOT_ALARM_OFF=1")
         return
 
-    # 알람은 메일이 사람에게 나간다. PC 업로드 사본으로 판정하지 않는다(Databricks 만 본다).
-    lims_snapshot.disable()
-
     if a.reset_state:
         storage_io.remove(STATE_PATH)
         _log("발송 이력 초기화 완료 (다음 실행이 새 기준선)")
@@ -327,8 +511,10 @@ def main():
         """스케줄 결정 — 우선순위: CLI 인자 > 설정파일(schedule) > 기본값(매일 07:30).
         매 루프마다 다시 읽으므로 알림설정 화면에서 바꾼 값이 재시작 없이 1분 내 반영된다."""
         try:
-            sched = (oot_mail.load_config() or {}).get("schedule", {}) or {}
+            sched = (oot_mail.load_config(strict=True) or {}).get("schedule", {}) or {}
         except Exception:
+            if last_sig is not None:     # 한 번 못 읽었다고 기본 일정으로 바꾸면 그날 재시도가 사라진다
+                return last_sig
             sched = {}
         try:
             iv = int(sched.get("interval_min", 10) or 10)
@@ -345,9 +531,12 @@ def main():
     def _desc(mode, dt, iv):
         return f"매일 {dt} 실행" if mode == "daily" else f"{iv}분 주기"
 
+    last_sig = None
     mode, dt, iv = _load_schedule()
     _log(f"OOT 자동 알람 시작 · {_desc(mode, dt, iv)}(한국 시간) · 메일: {axhub_mail.transport_name()} (Ctrl+C 종료)")
-    last_sig, last_run, next_run = None, None, 0.0
+    last_run, next_run = None, 0.0
+    seen_loaded, seen = False, None
+    upload_at = time.time() + BOOT_DELAY_SEC
     while True:
         mode, dt, iv = _load_schedule()
         sig = (mode, dt, iv)
@@ -363,15 +552,31 @@ def main():
             _log(f"다음 실행까지 {int(secs // 3600)}시간 {int((secs % 3600) // 60)}분 대기 ({_desc(mode, dt, iv)})")
             last_sig = sig
         if now >= next_run:
+            done = False
             try:
-                check_once()
+                done = _attempt()
             except Exception as e:
-                _log(f"점검 오류: {e}")
+                _log(f"점검 오류: {type(e).__name__}")
             last_run = time.time()
-            next_run = (last_run + _seconds_until_daily(dt)) if mode == "daily" else (last_run + iv * 60)
+            next_run = _next_after_attempt(done, dt, last_run) if mode == "daily" else (last_run + iv * 60)
             if mode == "daily":
                 secs = next_run - last_run
                 _log(f"다음 실행까지 {int(secs // 3600)}시간 {int((secs % 3600) // 60)}분 대기 ({_desc(mode, dt, iv)})")
+        elif now >= upload_at:           # 약 30초마다 — 새 업로드가 있으면 바로 점검
+            try:
+                if not seen_loaded:
+                    seen_loaded, seen = _load_seen()
+                as_of = _new_upload_as_of(seen) if seen_loaded else None
+                if as_of:
+                    _log(f"새 업로드 감지(자료 기준 {as_of[:16].replace('T', ' ')}) — 바로 점검")
+                    if _check_upload():
+                        seen = as_of
+                        _save_seen(as_of)
+                    else:                # 실패해도 매일 재시도와 같은 간격·같은 상한으로만 다시 본다
+                        upload_at = _next_after_attempt(False, dt, time.time())
+            except Exception as e:  # noqa: BLE001 — 알람 프로세스를 죽이지 않는다
+                _log(f"업로드 확인 오류: {type(e).__name__}")
+                upload_at = _next_after_attempt(False, dt, time.time())
         _beat()
         time.sleep(max(1, min(30, next_run - time.time())))
 

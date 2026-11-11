@@ -4,7 +4,7 @@
 사내 PC 는 Databricks 를 읽을 수 있으므로, PC 가 필요한 칸만 DuckDB 파일로 만들어 앱 보관함에 올린다
 (lims_upload.py). 화면(웹 프로세스)은 Databricks 를 먼저 시도하고, 403 일 때만 이 사본을 쓴다. BLOCK_SEC 뒤에는
 다시 Databricks 를 시도하므로 연동이 살아나면 저절로 돌아간다. 다른 오류(SQL 오류·시간 초과)는 사본으로 넘기지 않는다.
-알람(메일)과 넘김(다른 앱으로 가는 자료)은 disable() 로 사본을 쓰지 않는다. 사본은 MAX_AGE_SEC 이 지나면 쓰지 않는다.
+알람은 오늘 적재분인 사본일 때만 판정하고, 넘김(다른 앱으로 가는 자료)은 disable() 로 쓰지 않는다. 사본은 MAX_AGE_SEC 이 지나면 쓰지 않는다.
 """
 from __future__ import annotations
 
@@ -226,8 +226,26 @@ def in_use() -> bool:
     return not _disabled and time.time() < _blocked_until and not (_meta and _expired(_meta))
 
 
+def latest_meta() -> dict | None:
+    """보관함의 최신 머리표. 없거나 읽지 못하면 None(가벼운 조회 — 알람이 30초마다 부른다)."""
+    try:
+        raw = storage_io.snapshot_read(LATEST)
+        meta = json.loads(raw.decode("utf-8")) if raw else None
+    except Exception:  # noqa: BLE001
+        return None
+    ok = isinstance(meta, dict) and meta.get("schema") == SCHEMA and _ID.fullmatch(str(meta.get("id", "")))
+    return meta if ok and _as_of(meta) else None
+
+
+def release() -> None:
+    """알람 점검이 끝나면 연결을 놓는다. 메모리를 돌려주고, 다음 점검은 Databricks 부터 다시 시도하며 최신 판을 연다."""
+    global _con, _blocked_until, _checked, _failed_at, _answered_from_snapshot
+    with _lock:
+        _con, _blocked_until, _checked, _failed_at, _answered_from_snapshot = None, 0.0, 0.0, 0.0, False
+
+
 def disable() -> None:
-    """이 프로세스는 사본을 쓰지 않는다(알람·넘김)."""
+    """이 프로세스는 사본을 쓰지 않는다(넘김)."""
     global _disabled
     _disabled = True
 

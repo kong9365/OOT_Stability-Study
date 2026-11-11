@@ -29,6 +29,7 @@ sample_OOT_report.xlsx
 oot_export_*
 *.duckdb
 *.duckdb.gz
+.oot_alarm_data_seen.json
 
 # === 개발·이 PC 전용 ===
 tests/

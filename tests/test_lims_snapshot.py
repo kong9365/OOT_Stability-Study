@@ -102,7 +102,7 @@ def test_disabled_process_does_not_use_snapshot(snapshot, monkeypatch):
     assert not snap.in_use()
 
 
-def test_alarm_disables_snapshot_by_default(monkeypatch):
+def test_alarm_can_use_snapshot(monkeypatch):
     import sys
     import oot_alarm
     called = []
@@ -111,7 +111,16 @@ def test_alarm_disables_snapshot_by_default(monkeypatch):
     monkeypatch.setattr(oot_alarm.storage_io, "remove", lambda *_: None)
     monkeypatch.setattr(sys, "argv", ["oot_alarm.py", "--reset-state"])
     oot_alarm.main()
-    assert called
+    assert not called
+
+
+def test_release_returns_to_databricks_first(snapshot, monkeypatch):
+    monkeypatch.setattr(dbx, "_databricks_query", _raise(403))
+    _query(SQL, {"p": "005"})
+    assert snap.in_use()
+    monkeypatch.setattr(snap, "_con", object())
+    snap.release()
+    assert not snap.in_use() and snap._con is None and snap.status() == {"source": "databricks"}
 
 
 def test_export_disables_snapshot(monkeypatch):

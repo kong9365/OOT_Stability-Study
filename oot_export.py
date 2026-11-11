@@ -533,7 +533,7 @@ def scheduler_loop(poll_sec: int = 60) -> None:
         try:
             maybe_start_scheduled()
         except Exception as e:
-            _log(f"일정 점검 오류: {type(e).__name__}: {e}")
+            _log(f"일정 점검 오류: {type(e).__name__}")
         time.sleep(poll_sec)
 
 
