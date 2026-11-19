@@ -374,3 +374,26 @@ def test_run_once_error_reason_keeps_only_the_status_code(tmp_path):
     assert res["ok"] is False and res["reason"] == "HTTPError: 403" and res["blocked"] is True
     state = {"last_attempt": dict(res, at="2026-10-03T18:50:00Z")}
     assert oot_export._new_snapshot(state, at_kst(10, 0), lambda: {"built_at": "x"}) == "x"
+
+
+def test_run_once_keeps_only_own_error_text_and_releases_the_hold(tmp_path, monkeypatch):
+    """라이브러리 오류 글(주소·키가 실릴 수 있다)은 종류만 남기고, 직접 만든 글은 그대로. 운영 길은 끝나면 묶음을 푼다."""
+    import oot_export
+
+    class ClientError(Exception):
+        pass
+
+    def q(sql, params=None, large=False):
+        raise ClientError("An error occurred (403) when calling GetObject: AccessKeyId AKIAEXAMPLE https://example.invalid/x?sig=abc")
+    store = oot_export._Folder(str(tmp_path))
+    res = oot_export.run_once(store, q, now_fn=lambda: at_kst(3, 50))
+    assert res["ok"] is False and res["reason"] == "오류(ClientError)"
+    bad = oot_export.run_once(store, fake_export_query(F.rule_rows(), count_bias=1), now_fn=lambda: at_kst(3, 50))
+    assert bad["ok"] is False and bad["reason"].startswith("RuntimeError: ")
+    released = []
+    monkeypatch.setattr(oot_export.dbx, "query", fake_export_query(F.rule_rows()))
+    monkeypatch.setattr(oot_export.dbx, "query_iter", None)
+    monkeypatch.setattr(oot_export.dbx.lims_snapshot, "hold_source", lambda: {"source": "databricks"})
+    monkeypatch.setattr(oot_export.dbx.lims_snapshot, "release_hold", lambda: released.append(1))
+    ok = oot_export.run_once(store, None, now_fn=lambda: at_kst(3, 50))
+    assert ok["ok"] and ok["lims_source"] == "databricks" and released == [1]

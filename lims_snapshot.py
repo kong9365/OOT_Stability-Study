@@ -67,6 +67,7 @@ _refreshing = False
 _answered_from_snapshot = False
 _disabled = False
 _pinned = False                  # 넘김 한 번 실행을 지금 연 사본 판에 묶음(새 판 확인·Databricks 재시도 끔)
+_held: tuple = ()                # hold_source 가 묶은 동안 (True, 묶기 전의 _disabled)
 
 
 class SnapshotUnavailable(RuntimeError):
@@ -249,13 +250,22 @@ def hold_source() -> dict:
     """넘김 한 번 실행을 한 출처에 묶는다 — 판 하나에 두 출처·두 사본 판이 섞이지 않게(2026-11-19 독립 검토).
     직전 조회에 사본이 답했으면 그 판에 고정하고(새 판으로 갈아타지 않음 · Databricks 를 다시 시도하지 않음), Databricks 가 답했으면
     이 프로세스에서 사본을 끈다(도중에 403 이 나면 실패로 끝나 이전 판이 남는다). 돌려주는 값: status() 에 사본이면 판 id 를 더한 것."""
-    global _pinned, _disabled
+    global _pinned, _disabled, _held
     st = status()
+    if not _held:
+        _held = (True, _disabled)       # 묶기 전의 끔 상태를 기억해 둔다(release_hold 가 되돌린다)
     if st["source"] == "snapshot":
         _pinned = True
         return dict(st, id=str(_meta.get("id", "")))
     _disabled = True
     return st
+
+
+def release_hold() -> None:
+    """hold_source 로 묶은 것을 푼다 — 넘김 실행이 끝나면 부른다(같은 프로세스가 이어서 조회해도 Databricks 재시도·새 판 확인이 다시 돈다)."""
+    global _pinned, _disabled, _held
+    if _held:
+        _pinned, _disabled, _held = False, _held[1], ()
 
 
 def disable() -> None:

@@ -305,6 +305,7 @@ def test_data_source_api_has_no_personal_data(snapshot):
 def test_hold_source_pins_one_snapshot_or_turns_it_off(snapshot, monkeypatch):
     """넘김 한 번 실행 = 한 출처(2026-11-19 독립 검토): 사본이 답했으면 그 판에 묶이고, Databricks 가 답했으면 사본을 끈다."""
     monkeypatch.setattr(snap, "_pinned", False)
+    monkeypatch.setattr(snap, "_held", ())
     monkeypatch.setattr(dbx, "_databricks_query", _raise(403))
     _query(SQL, {"p": "005"})
     held = snap.hold_source()
@@ -314,4 +315,12 @@ def test_hold_source_pins_one_snapshot_or_turns_it_off(snapshot, monkeypatch):
     monkeypatch.setattr(snap, "_pinned", False)
     monkeypatch.setattr(snap, "_answered_from_snapshot", False)
     assert snap.hold_source() == {"source": "databricks"} and snap._disabled and not snap.in_use()
+    snap.release_hold()                                       # 끝나면 풀린다 — 끔 상태도 묶기 전으로
+    assert not snap._pinned and not snap._disabled and snap._held == ()
+    monkeypatch.setattr(dbx, "_databricks_query", _raise(403))
+    _query(SQL, {"p": "005"})
+    snap.hold_source()
+    snap.release_hold()
+    monkeypatch.setattr(snap, "_blocked_until", 0.0)          # 풀린 뒤에는 10분이 지나면 Databricks 를 다시 시도한다
+    assert not snap._pinned and not snap.in_use()
     snap.mark_databricks()                                    # 이 스레드에 남은 '사본이 답함' 표시를 지운다(뒤 시험이 본다)

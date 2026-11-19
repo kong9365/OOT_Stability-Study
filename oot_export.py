@@ -446,10 +446,11 @@ def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
     source_fn 은 방금 조회에 답한 출처를 돌려주고 이 실행을 그 출처에 묶는다(lims_snapshot.hold_source) — Databricks 가 403 으로
     막혀 PC 업로드 사본이 답했으면 새벽 적재를 기다리지 않고 그 사본 판 하나로 만든다(사본은 낮에 올라온다).
     사본이 오래됐거나(36시간) 자료 시각이 앞날이면, 또는 끝날 때 출처·사본 판이 처음과 다르면 이전 판을 그대로 둔다."""
-    rows_iter = None
+    rows_iter = release_fn = None
     if query is None:                       # 운영: 줄 조회는 조각 단위로 흘려 읽는다(1GiB 안에 들게)
         query, rows_iter = dbx.query, dbx.query_iter
         source_fn = source_fn or dbx.lims_snapshot.hold_source
+        release_fn = dbx.lims_snapshot.release_hold
     attempt = {"at": _iso(now_fn()), "ok": False, "reason": "", "data_as_of": "", "export_id": "",
                "new_version": False, "lims_source": ""}
     try:
@@ -497,8 +498,13 @@ def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
             attempt["blocked"] = code == 403
         elif type(e).__module__.split(".")[0] == "duckdb":   # 사본 조회 오류 글에는 값 원문·임시 경로가 실릴 수 있다 — 종류만
             attempt["reason"] = f"사본 조회 오류({type(e).__name__})"
-        else:
-            attempt["reason"] = f"{type(e).__name__}: {e}"[:500]
+        elif type(e) in (RuntimeError, ValueError) or isinstance(e, dbx.lims_snapshot.SnapshotUnavailable):
+            attempt["reason"] = f"{type(e).__name__}: {e}"[:500]    # 이 앱이 직접 만든 글(줄 수 불일치 · 저장소 준비 실패 · 사본 없음 등)
+        else:                               # 그 밖의 라이브러리 오류 글에는 주소·키·조회 조건이 실릴 수 있다 — 종류만
+            attempt["reason"] = f"오류({type(e).__name__})"
+    finally:
+        if release_fn:
+            release_fn()
     return _finish(store, attempt)
 
 
