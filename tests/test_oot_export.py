@@ -298,18 +298,19 @@ def test_scheduler_once_a_day(tmp_path):
 
 
 # ── Databricks 가 막힌 동안 PC 업로드 사본으로(2026-11-19) ─────────────────────
-_SNAP = {"source": "snapshot", "built_at": "2026-10-03T23:40:00Z", "data_as_of": "2026-10-03T23:30:00Z", "stale": False}
+_SNAP = {"source": "snapshot", "id": "aaaaaaaaaaaa", "built_at": "2026-10-03T23:40:00Z", "data_as_of": "2026-10-03T23:30:00Z", "stale": False}
+YESTERDAY_TS = "2026-10-03T02:00:00.000Z"      # 어제 낮 적재 — 오늘 새벽 적재 전이지만 36시간 안
 
 
 def test_run_once_builds_from_pc_snapshot_without_waiting(tmp_path):
     import oot_export
     store = oot_export._Folder(str(tmp_path))
     slept = []
-    res = oot_export.run_once(store, fake_export_query(F.rule_rows(), stamp=STALE_TS), wait_fresh=True,
+    res = oot_export.run_once(store, fake_export_query(F.rule_rows(), stamp=YESTERDAY_TS), wait_fresh=True,
                               now_fn=lambda: at_kst(4, 50), sleep_fn=slept.append, source_fn=lambda: dict(_SNAP))
     assert res["ok"] and res["lims_source"] == "snapshot" and "PC 업로드" in res["reason"] and not slept
     meta, _ = oot_export.read_latest(store)
-    assert meta["lims_source"] == {"source": "snapshot", "built_at": _SNAP["built_at"], "data_as_of": _SNAP["data_as_of"]}
+    assert meta["lims_source"] == {"source": "snapshot", "id": "aaaaaaaaaaaa", "built_at": _SNAP["built_at"], "data_as_of": _SNAP["data_as_of"]}
     assert json.loads((tmp_path / oot_export.STATE).read_text(encoding="utf-8"))["snapshot_built_at"] == _SNAP["built_at"]
 
 
@@ -317,14 +318,18 @@ def test_run_once_keeps_previous_version_when_snapshot_is_stale_or_source_change
     import oot_export
     store = oot_export._Folder(str(tmp_path))
     first = oot_export.run_once(store, fake_export_query(F.rule_rows()), now_fn=lambda: at_kst(3, 50))
-    assert first["ok"] and first["lims_source"] == "databricks" and oot_export.read_latest(store)[0].get("lims_source") == {"source": "databricks"}
-    stale = oot_export.run_once(store, fake_export_query(_version(1), stamp=STALE_TS), now_fn=lambda: at_kst(9, 0),
-                                source_fn=lambda: dict(_SNAP, stale=True))
-    assert stale["ok"] is False and "오래되어" in stale["reason"]
-    answers = iter([dict(_SNAP), {"source": "databricks"}])        # 만드는 도중 연동이 돌아옴
-    mixed = oot_export.run_once(store, fake_export_query(_version(2), stamp=STALE_TS), now_fn=lambda: at_kst(9, 30),
-                                source_fn=lambda: next(answers))
-    assert mixed["ok"] is False and "출처가 바뀌어" in mixed["reason"]
+    assert first["ok"] and first["lims_source"] == "offline" and oot_export.read_latest(store)[0].get("lims_source") == {"source": "offline"}
+    for src, stamp in ((dict(_SNAP, stale=True), YESTERDAY_TS), (dict(_SNAP), STALE_TS)):     # 머리표가 오래됨 · 자료의 적재 시각이 오래됨
+        stale = oot_export.run_once(store, fake_export_query(_version(1), stamp=stamp), now_fn=lambda: at_kst(9, 0), source_fn=lambda: src)
+        assert stale["ok"] is False and "오래되어" in stale["reason"]
+    future = oot_export.run_once(store, fake_export_query(_version(1), stamp="2026-10-09T00:00:00Z"), now_fn=lambda: at_kst(9, 0),
+                                 source_fn=lambda: dict(_SNAP))
+    assert future["ok"] is False and "앞날" in future["reason"]
+    for second in ({"source": "databricks"}, dict(_SNAP, id="bbbbbbbbbbbb")):                # 도중에 연동이 돌아옴 · 사본 판이 바뀜
+        answers = iter([dict(_SNAP), second])
+        mixed = oot_export.run_once(store, fake_export_query(_version(2), stamp=YESTERDAY_TS), now_fn=lambda: at_kst(9, 30),
+                                    source_fn=lambda: next(answers))
+        assert mixed["ok"] is False and "출처가 바뀌어" in mixed["reason"]
     assert oot_export.read_latest(store)[0]["export_id"] == first["export_id"]
 
 
@@ -343,9 +348,29 @@ def test_scheduler_runs_again_for_a_new_pc_snapshot_only_while_blocked(tmp_path)
                                                 "reason": "HTTPError: 403 Client Error: Forbidden for url: x"})
     assert oot_export.maybe_start_scheduled(store, at_kst(10, 0), start, lambda: latest) == "started" and calls[-1] == []
     assert oot_export.maybe_start_scheduled(store, at_kst(10, 30), start, lambda: latest) == "done-today"
+    # 도는 중이라 못 띄운 사본은 '한 것'으로 적지 않는다 — 다음 점검에서 다시 본다
+    newer = {"built_at": "2026-10-04T01:20:00Z"}
+    assert oot_export.maybe_start_scheduled(store, at_kst(10, 31), lambda a: "running", lambda: newer) == "running"
+    assert oot_export.maybe_start_scheduled(store, at_kst(10, 32), start, lambda: newer) == "started"
     # 마지막 시도 뒤 15분 안에는 보관함을 보지 않는다
     oot_export.write_state(store, last_attempt={"at": at_kst(10, 40).isoformat(), "ok": True, "lims_source": "snapshot", "reason": ""})
     boom = lambda: (_ for _ in ()).throw(AssertionError("15분 안에는 읽지 않는다"))
     assert oot_export.maybe_start_scheduled(store, at_kst(10, 45), start, boom) == "done-today"
     assert oot_export.maybe_start_scheduled(store, at_kst(11, 0), start, lambda: {"built_at": "2026-10-04T01:50:00Z"}) == "started"
-    assert len(calls) == 3
+    assert len(calls) == 4
+
+
+def test_run_once_error_reason_keeps_only_the_status_code(tmp_path):
+    import requests
+    import oot_export
+
+    class _R:
+        status_code = 403
+
+    def q(sql, params=None, large=False):
+        raise requests.HTTPError("403 Client Error: Forbidden for url: https://example.invalid/secret-path", response=_R())
+    store = oot_export._Folder(str(tmp_path))
+    res = oot_export.run_once(store, q, now_fn=lambda: at_kst(3, 50))
+    assert res["ok"] is False and res["reason"] == "HTTPError: 403" and res["blocked"] is True
+    state = {"last_attempt": dict(res, at="2026-10-03T18:50:00Z")}
+    assert oot_export._new_snapshot(state, at_kst(10, 0), lambda: {"built_at": "x"}) == "x"

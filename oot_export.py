@@ -54,6 +54,7 @@ START_AT = (3, 45)                  # 일정 실행 시작(KST)
 DEADLINE = dtime(4, 45)             # 이때까지 적재가 안 되면 이전 판을 그대로 둠
 RETRY_SEC = 15 * 60
 RUNNING_STALE_SEC = 3 * 3600
+SNAPSHOT_MAX_AGE_SEC = 36 * 3600     # PC 업로드 사본으로 넘김을 만들 수 있는 자료 나이(lims_snapshot.STALE_SEC 와 같게)
 CODE_FILES = ("kdp_core.py", "oot_export.py")
 
 LATEST, STATE, INDEX, RUNNING = ("oot_export_latest.json", "oot_export_state.json",
@@ -442,12 +443,13 @@ def save_version(store, meta: dict, gz: bytes, keep: int = KEEP) -> bool:
 def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
              now_fn=now_utc, sleep_fn=time.sleep, source_fn=None) -> dict:
     """한 번 시도하고 '마지막 시도' 상태를 남긴다(성공·실패 모두).
-    source_fn 은 방금 조회에 답한 출처(lims_snapshot.status 꼴)를 돌려준다 — Databricks 가 403 으로 막혀 PC 업로드 사본이
-    답했으면 새벽 적재를 기다리지 않고 그 사본으로 만든다(사본은 낮에 올라온다). 사본이 오래됐으면 이전 판을 그대로 둔다."""
+    source_fn 은 방금 조회에 답한 출처를 돌려주고 이 실행을 그 출처에 묶는다(lims_snapshot.hold_source) — Databricks 가 403 으로
+    막혀 PC 업로드 사본이 답했으면 새벽 적재를 기다리지 않고 그 사본 판 하나로 만든다(사본은 낮에 올라온다).
+    사본이 오래됐거나(36시간) 자료 시각이 앞날이면, 또는 끝날 때 출처·사본 판이 처음과 다르면 이전 판을 그대로 둔다."""
     rows_iter = None
     if query is None:                       # 운영: 줄 조회는 조각 단위로 흘려 읽는다(1GiB 안에 들게)
         query, rows_iter = dbx.query, dbx.query_iter
-        source_fn = source_fn or dbx.lims_snapshot.status
+        source_fn = source_fn or dbx.lims_snapshot.hold_source
     attempt = {"at": _iso(now_fn()), "ok": False, "reason": "", "data_as_of": "", "export_id": "",
                "new_version": False, "lims_source": ""}
     try:
@@ -457,11 +459,15 @@ def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
             by_table = {str(r["T"]): r["M"] for r in query(FRESH_SQL)}
             as_of, fresh = freshness(by_table, now_fn())
             attempt["data_as_of"] = as_of
-            src = source_fn() if source_fn else {"source": "databricks"}
+            src = source_fn() if source_fn else {"source": "offline"}
             attempt["lims_source"] = str(src.get("source") or "")
             if src.get("source") == "snapshot":
-                if src.get("stale"):
+                t, now = _parse_ts(as_of), now_fn()     # 머리표가 아니라 자료에서 읽은 적재 시각으로도 본다(올린 쪽 시계가 틀려도)
+                if src.get("stale") or t is None or (now - t).total_seconds() > SNAPSHOT_MAX_AGE_SEC:
                     attempt["reason"] = "PC 업로드 LIMS 사본이 오래되어(36시간 넘음) 이전 판을 그대로 둠"
+                    return _finish(store, attempt)
+                if (t - now).total_seconds() > 600:
+                    attempt["reason"] = "PC 업로드 LIMS 사본의 자료 시각이 앞날이라 이전 판을 그대로 둠"
                     return _finish(store, attempt)
                 fresh = dict(fresh, reason=f"PC 업로드 LIMS 사본으로 만듦(사본 자료 기준 {src.get('data_as_of') or '-'})")
                 break
@@ -473,18 +479,26 @@ def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
             sleep_fn(RETRY_SEC)
         jsonl, gz, meta = build(query, by_table, as_of, fresh, now_fn(), rows_iter=rows_iter)
         meta["storage"] = store.mode
-        src = source_fn() if source_fn else {"source": "databricks"}
-        if str(src.get("source") or "") != attempt["lims_source"]:   # 만드는 도중 출처가 바뀌면(연동이 돌아옴 등) 섞인 판을 내지 않는다
+        end = source_fn() if source_fn else {"source": "offline"}
+        if (end.get("source"), end.get("id")) != (src.get("source"), src.get("id")):   # 출처·사본 판이 처음과 다르면 섞인 판을 내지 않는다
             attempt["reason"] = "만드는 도중 LIMS 자료 출처가 바뀌어 이전 판을 그대로 둠"
             return _finish(store, attempt)
-        meta["lims_source"] = ({"source": "snapshot", "built_at": str(src.get("built_at") or ""), "data_as_of": str(src.get("data_as_of") or "")}
-                               if src.get("source") == "snapshot" else {"source": "databricks"})
+        meta["lims_source"] = ({"source": "snapshot", "id": str(src.get("id") or ""), "built_at": str(src.get("built_at") or ""),
+                                "data_as_of": str(src.get("data_as_of") or "")}
+                               if src.get("source") == "snapshot" else {"source": str(src.get("source") or "")})
         new = save_version(store, meta, gz, keep)
         attempt.update(ok=True, export_id=meta["export_id"], new_version=new, reason=fresh["reason"])
         if src.get("source") == "snapshot":
             write_state(store, snapshot_built_at=str(src.get("built_at") or ""))
     except Exception as e:  # 까닭을 남기고 끝낸다 — 이전 판은 그대로
-        attempt["reason"] = f"{type(e).__name__}: {e}"[:500]
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        if code is not None:                # HTTP 오류는 상태 코드만(주소·조회 번호를 남기지 않는다)
+            attempt["reason"] = f"{type(e).__name__}: {code}"
+            attempt["blocked"] = code == 403
+        elif type(e).__module__.split(".")[0] == "duckdb":   # 사본 조회 오류 글에는 값 원문·임시 경로가 실릴 수 있다 — 종류만
+            attempt["reason"] = f"사본 조회 오류({type(e).__name__})"
+        else:
+            attempt["reason"] = f"{type(e).__name__}: {e}"[:500]
     return _finish(store, attempt)
 
 
@@ -541,7 +555,8 @@ def _new_snapshot(state: dict, now: datetime, latest_fn) -> str:
     """Databricks 가 막힌 동안(마지막 시도가 사본으로 만들었거나 403 으로 실패) 새 PC 업로드 사본이 올라왔으면 그 사본의 만든 시각.
     아니면 ''. 마지막 시도 뒤 RETRY_SEC 안에는 보지 않는다(보관함 읽기를 아낀다 · 연달아 띄우지 않는다)."""
     last = state.get("last_attempt") or {}
-    blocked = last.get("lims_source") == "snapshot" or (not last.get("ok") and " 403 " in f" {last.get('reason') or ''} ")
+    blocked = (last.get("lims_source") == "snapshot" or bool(last.get("blocked"))
+               or (not last.get("ok") and "403 Client Error" in str(last.get("reason") or "")))    # 옛 판이 남긴 상태 글
     at = _parse_ts(last.get("at"))
     if not blocked or (at and (now - at).total_seconds() < RETRY_SEC):
         return ""
@@ -563,8 +578,10 @@ def maybe_start_scheduled(store=None, now: datetime | None = None, start=None, l
         built = _new_snapshot(state, now, latest_fn or dbx.lims_snapshot.latest_meta)
         if not built:
             return "done-today"
-        write_state(store, snapshot_built_at=built)      # 같은 사본으로 다시 띄우지 않게 먼저 적는다
-        return (start or start_child)([])
+        res = (start or start_child)([])
+        if res == "started":                             # 실제로 띄웠을 때만 적는다 — 도는 중이라 못 띄운 사본을 '한 것'으로 치지 않게
+            write_state(store, snapshot_built_at=built)
+        return res
     write_state(store, attempt_day=day)          # 재시작해도 같은 날 다시 돌지 않게 먼저 적는다
     return (start or start_child)(["--wait-fresh"])
 

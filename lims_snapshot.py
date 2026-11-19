@@ -66,6 +66,7 @@ _failed_at = 0.0
 _refreshing = False
 _answered_from_snapshot = False
 _disabled = False
+_pinned = False                  # 넘김 한 번 실행을 지금 연 사본 판에 묶음(새 판 확인·Databricks 재시도 끔)
 
 
 class SnapshotUnavailable(RuntimeError):
@@ -198,7 +199,7 @@ def _connection():
     global _checked, _refreshing, _failed_at
     with _lock:
         con, meta = _con, _meta
-        if con is not None and time.time() - _checked >= CHECK_SEC and not _refreshing:
+        if con is not None and time.time() - _checked >= CHECK_SEC and not _refreshing and not _pinned:
             _checked, _refreshing = time.time(), True
             threading.Thread(target=_background_refresh, daemon=True).start()
     if con is None:
@@ -223,7 +224,7 @@ def _connection():
 
 
 def in_use() -> bool:
-    return not _disabled and time.time() < _blocked_until and not (_meta and _expired(_meta))
+    return not _disabled and (_pinned or time.time() < _blocked_until) and not (_meta and _expired(_meta))
 
 
 def latest_meta() -> dict | None:
@@ -244,8 +245,21 @@ def release() -> None:
         _con, _blocked_until, _checked, _failed_at, _answered_from_snapshot = None, 0.0, 0.0, 0.0, False
 
 
+def hold_source() -> dict:
+    """넘김 한 번 실행을 한 출처에 묶는다 — 판 하나에 두 출처·두 사본 판이 섞이지 않게(2026-11-19 독립 검토).
+    직전 조회에 사본이 답했으면 그 판에 고정하고(새 판으로 갈아타지 않음 · Databricks 를 다시 시도하지 않음), Databricks 가 답했으면
+    이 프로세스에서 사본을 끈다(도중에 403 이 나면 실패로 끝나 이전 판이 남는다). 돌려주는 값: status() 에 사본이면 판 id 를 더한 것."""
+    global _pinned, _disabled
+    st = status()
+    if st["source"] == "snapshot":
+        _pinned = True
+        return dict(st, id=str(_meta.get("id", "")))
+    _disabled = True
+    return st
+
+
 def disable() -> None:
-    """이 프로세스는 사본을 쓰지 않는다(지금은 부르는 곳이 없다 — 넘김도 2026-11-19 부터 사본을 쓴다)."""
+    """이 프로세스는 사본을 쓰지 않는다."""
     global _disabled
     _disabled = True
 

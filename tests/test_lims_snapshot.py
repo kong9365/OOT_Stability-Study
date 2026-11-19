@@ -300,3 +300,18 @@ def test_data_source_api_has_no_personal_data(snapshot):
     import dashboard_api
     r = TestClient(dashboard_api.app).get("/api/data-source")
     assert r.status_code == 200 and "@" not in r.text and "\\" not in r.text
+
+
+def test_hold_source_pins_one_snapshot_or_turns_it_off(snapshot, monkeypatch):
+    """넘김 한 번 실행 = 한 출처(2026-11-19 독립 검토): 사본이 답했으면 그 판에 묶이고, Databricks 가 답했으면 사본을 끈다."""
+    monkeypatch.setattr(snap, "_pinned", False)
+    monkeypatch.setattr(dbx, "_databricks_query", _raise(403))
+    _query(SQL, {"p": "005"})
+    held = snap.hold_source()
+    assert held["source"] == "snapshot" and held["id"] == snap._meta["id"] and snap._pinned
+    monkeypatch.setattr(snap, "_blocked_until", 0.0)          # 10분이 지나도 Databricks 를 다시 시도하지 않는다
+    assert snap.in_use()
+    monkeypatch.setattr(snap, "_pinned", False)
+    monkeypatch.setattr(snap, "_answered_from_snapshot", False)
+    assert snap.hold_source() == {"source": "databricks"} and snap._disabled and not snap.in_use()
+    snap.mark_databricks()                                    # 이 스레드에 남은 '사본이 답함' 표시를 지운다(뒤 시험이 본다)
