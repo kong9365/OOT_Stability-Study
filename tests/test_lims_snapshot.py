@@ -123,12 +123,12 @@ def test_release_returns_to_databricks_first(snapshot, monkeypatch):
     assert not snap.in_use() and snap._con is None and snap.status() == {"source": "databricks"}
 
 
-def test_export_disables_snapshot(monkeypatch):
+def test_export_can_use_snapshot(monkeypatch):
     import oot_export
     called = []
     monkeypatch.setattr(snap, "disable", lambda: called.append(1))
     assert oot_export.main(["--offline", "x"]) == 2      # --out 없이 바로 끝나는 길
-    assert called
+    assert not called                                    # 2026-11-19: 넘김도 Databricks 403 때 PC 업로드 사본으로 만든다
 
 
 def _aged(days):

@@ -295,3 +295,57 @@ def test_scheduler_once_a_day(tmp_path):
     assert oot_export.maybe_start_scheduled(store, at_kst(3, 46, day=5), start) == "started"
     assert calls == [["--wait-fresh"], ["--wait-fresh"]]
 
+
+
+# ── Databricks 가 막힌 동안 PC 업로드 사본으로(2026-11-19) ─────────────────────
+_SNAP = {"source": "snapshot", "built_at": "2026-10-03T23:40:00Z", "data_as_of": "2026-10-03T23:30:00Z", "stale": False}
+
+
+def test_run_once_builds_from_pc_snapshot_without_waiting(tmp_path):
+    import oot_export
+    store = oot_export._Folder(str(tmp_path))
+    slept = []
+    res = oot_export.run_once(store, fake_export_query(F.rule_rows(), stamp=STALE_TS), wait_fresh=True,
+                              now_fn=lambda: at_kst(4, 50), sleep_fn=slept.append, source_fn=lambda: dict(_SNAP))
+    assert res["ok"] and res["lims_source"] == "snapshot" and "PC 업로드" in res["reason"] and not slept
+    meta, _ = oot_export.read_latest(store)
+    assert meta["lims_source"] == {"source": "snapshot", "built_at": _SNAP["built_at"], "data_as_of": _SNAP["data_as_of"]}
+    assert json.loads((tmp_path / oot_export.STATE).read_text(encoding="utf-8"))["snapshot_built_at"] == _SNAP["built_at"]
+
+
+def test_run_once_keeps_previous_version_when_snapshot_is_stale_or_source_changes(tmp_path):
+    import oot_export
+    store = oot_export._Folder(str(tmp_path))
+    first = oot_export.run_once(store, fake_export_query(F.rule_rows()), now_fn=lambda: at_kst(3, 50))
+    assert first["ok"] and first["lims_source"] == "databricks" and oot_export.read_latest(store)[0].get("lims_source") == {"source": "databricks"}
+    stale = oot_export.run_once(store, fake_export_query(_version(1), stamp=STALE_TS), now_fn=lambda: at_kst(9, 0),
+                                source_fn=lambda: dict(_SNAP, stale=True))
+    assert stale["ok"] is False and "오래되어" in stale["reason"]
+    answers = iter([dict(_SNAP), {"source": "databricks"}])        # 만드는 도중 연동이 돌아옴
+    mixed = oot_export.run_once(store, fake_export_query(_version(2), stamp=STALE_TS), now_fn=lambda: at_kst(9, 30),
+                                source_fn=lambda: next(answers))
+    assert mixed["ok"] is False and "출처가 바뀌어" in mixed["reason"]
+    assert oot_export.read_latest(store)[0]["export_id"] == first["export_id"]
+
+
+def test_scheduler_runs_again_for_a_new_pc_snapshot_only_while_blocked(tmp_path):
+    import oot_export
+    store = oot_export._Folder(str(tmp_path))
+    calls = []
+    start = lambda args: calls.append(args) or "started"
+    latest = {"built_at": "2026-10-04T01:00:00Z"}
+    assert oot_export.maybe_start_scheduled(store, at_kst(3, 46), start, lambda: latest) == "started"      # 하루 한 번(새벽)
+    # 마지막 시도가 Databricks 로 성공했으면 새 사본이 있어도 다시 돌지 않는다
+    oot_export.write_state(store, last_attempt={"at": "2026-10-03T18:50:00Z", "ok": True, "lims_source": "databricks", "reason": ""})
+    assert oot_export.maybe_start_scheduled(store, at_kst(10, 0), start, lambda: latest) == "done-today"
+    # 403 으로 실패했고 새 사본이 올라왔으면 그 사본으로 한 번 — 같은 사본으로는 다시 안 띄운다
+    oot_export.write_state(store, last_attempt={"at": "2026-10-03T18:50:00Z", "ok": False, "lims_source": "",
+                                                "reason": "HTTPError: 403 Client Error: Forbidden for url: x"})
+    assert oot_export.maybe_start_scheduled(store, at_kst(10, 0), start, lambda: latest) == "started" and calls[-1] == []
+    assert oot_export.maybe_start_scheduled(store, at_kst(10, 30), start, lambda: latest) == "done-today"
+    # 마지막 시도 뒤 15분 안에는 보관함을 보지 않는다
+    oot_export.write_state(store, last_attempt={"at": at_kst(10, 40).isoformat(), "ok": True, "lims_source": "snapshot", "reason": ""})
+    boom = lambda: (_ for _ in ()).throw(AssertionError("15분 안에는 읽지 않는다"))
+    assert oot_export.maybe_start_scheduled(store, at_kst(10, 45), start, boom) == "done-today"
+    assert oot_export.maybe_start_scheduled(store, at_kst(11, 0), start, lambda: {"built_at": "2026-10-04T01:50:00Z"}) == "started"
+    assert len(calls) == 3

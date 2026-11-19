@@ -7,6 +7,9 @@ oot_export.py — OOT 넘김 파일(줄 단위 판정 자료 + 머리표)을 만
 일정 흐름은 start_child() 로 자식 프로세스만 띄운다(HTTP 주소는 없다 — 받는 앱은 보관함을 직접 읽는다).
 - 한 번에 하나만: 프로세스 안 잠금 + 저장소의 '도는 중' 표지(oot_export_running.json)
 - 하루 한 번: 03:45 KST 이후, 그날 이미 시도했으면(oot_export_state.json 의 attempt_day) 다시 돌지 않음
+- Databricks 가 403 으로 막힌 동안은 PC 가 올린 LIMS 사본(lims_snapshot)으로 만든다(2026-11-19 — 넘김이 11-06 에서 멈춰 받는 쪽
+  OOT 알림이 낡았다). 사본이 36시간보다 오래됐으면 만들지 않고, 새 사본이 올라오면 그 사본으로 한 번 더 만든다.
+  머리표의 lims_source 에 출처(databricks · snapshot + 사본 만든 시각·자료 기준)를 적는다
 - 매번 '마지막 시도' 상태(시각·성공 여부·까닭·자료 기준 시각)를 남긴다(G1)
 - 판 id = 줄 파일(LF, 압축 전) sha256 앞 12자리. 같은 id 의 머리표는 덮지 않는다(G6). 7판만 남김(M5)
 시각은 컨테이너 시계 설정과 상관없이 세계시+9시간(KST)으로 잰다.
@@ -437,13 +440,16 @@ def save_version(store, meta: dict, gz: bytes, keep: int = KEEP) -> bool:
 
 
 def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
-             now_fn=now_utc, sleep_fn=time.sleep) -> dict:
-    """한 번 시도하고 '마지막 시도' 상태를 남긴다(성공·실패 모두)."""
+             now_fn=now_utc, sleep_fn=time.sleep, source_fn=None) -> dict:
+    """한 번 시도하고 '마지막 시도' 상태를 남긴다(성공·실패 모두).
+    source_fn 은 방금 조회에 답한 출처(lims_snapshot.status 꼴)를 돌려준다 — Databricks 가 403 으로 막혀 PC 업로드 사본이
+    답했으면 새벽 적재를 기다리지 않고 그 사본으로 만든다(사본은 낮에 올라온다). 사본이 오래됐으면 이전 판을 그대로 둔다."""
     rows_iter = None
     if query is None:                       # 운영: 줄 조회는 조각 단위로 흘려 읽는다(1GiB 안에 들게)
         query, rows_iter = dbx.query, dbx.query_iter
+        source_fn = source_fn or dbx.lims_snapshot.status
     attempt = {"at": _iso(now_fn()), "ok": False, "reason": "", "data_as_of": "", "export_id": "",
-               "new_version": False}
+               "new_version": False, "lims_source": ""}
     try:
         if store.mode == "s3-broken":
             raise RuntimeError("저장소(S3) 설정은 있으나 연결 준비에 실패했습니다")
@@ -451,6 +457,14 @@ def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
             by_table = {str(r["T"]): r["M"] for r in query(FRESH_SQL)}
             as_of, fresh = freshness(by_table, now_fn())
             attempt["data_as_of"] = as_of
+            src = source_fn() if source_fn else {"source": "databricks"}
+            attempt["lims_source"] = str(src.get("source") or "")
+            if src.get("source") == "snapshot":
+                if src.get("stale"):
+                    attempt["reason"] = "PC 업로드 LIMS 사본이 오래되어(36시간 넘음) 이전 판을 그대로 둠"
+                    return _finish(store, attempt)
+                fresh = dict(fresh, reason=f"PC 업로드 LIMS 사본으로 만듦(사본 자료 기준 {src.get('data_as_of') or '-'})")
+                break
             if fresh["ok"] or not wait_fresh:
                 break
             if now_fn().astimezone(KST).time() >= DEADLINE:
@@ -459,8 +473,16 @@ def run_once(store, query=None, wait_fresh: bool = False, keep: int = KEEP,
             sleep_fn(RETRY_SEC)
         jsonl, gz, meta = build(query, by_table, as_of, fresh, now_fn(), rows_iter=rows_iter)
         meta["storage"] = store.mode
+        src = source_fn() if source_fn else {"source": "databricks"}
+        if str(src.get("source") or "") != attempt["lims_source"]:   # 만드는 도중 출처가 바뀌면(연동이 돌아옴 등) 섞인 판을 내지 않는다
+            attempt["reason"] = "만드는 도중 LIMS 자료 출처가 바뀌어 이전 판을 그대로 둠"
+            return _finish(store, attempt)
+        meta["lims_source"] = ({"source": "snapshot", "built_at": str(src.get("built_at") or ""), "data_as_of": str(src.get("data_as_of") or "")}
+                               if src.get("source") == "snapshot" else {"source": "databricks"})
         new = save_version(store, meta, gz, keep)
         attempt.update(ok=True, export_id=meta["export_id"], new_version=new, reason=fresh["reason"])
+        if src.get("source") == "snapshot":
+            write_state(store, snapshot_built_at=str(src.get("built_at") or ""))
     except Exception as e:  # 까닭을 남기고 끝낸다 — 이전 판은 그대로
         attempt["reason"] = f"{type(e).__name__}: {e}"[:500]
     return _finish(store, attempt)
@@ -515,15 +537,34 @@ def start_child(extra_args=(), store=None) -> str:
         return "started"
 
 
-def maybe_start_scheduled(store=None, now: datetime | None = None, start=None) -> str:
-    """일정 점검 한 번: 03:45 KST 이후이고 오늘 아직 안 했으면 띄운다."""
+def _new_snapshot(state: dict, now: datetime, latest_fn) -> str:
+    """Databricks 가 막힌 동안(마지막 시도가 사본으로 만들었거나 403 으로 실패) 새 PC 업로드 사본이 올라왔으면 그 사본의 만든 시각.
+    아니면 ''. 마지막 시도 뒤 RETRY_SEC 안에는 보지 않는다(보관함 읽기를 아낀다 · 연달아 띄우지 않는다)."""
+    last = state.get("last_attempt") or {}
+    blocked = last.get("lims_source") == "snapshot" or (not last.get("ok") and " 403 " in f" {last.get('reason') or ''} ")
+    at = _parse_ts(last.get("at"))
+    if not blocked or (at and (now - at).total_seconds() < RETRY_SEC):
+        return ""
+    built = str((latest_fn() or {}).get("built_at") or "")
+    return built if built and built != state.get("snapshot_built_at") else ""
+
+
+def maybe_start_scheduled(store=None, now: datetime | None = None, start=None, latest_fn=None) -> str:
+    """일정 점검 한 번: 03:45 KST 이후이고 오늘 아직 안 했으면 띄운다.
+    오늘 이미 했어도, Databricks 가 막힌 동안 새 PC 업로드 사본이 올라왔으면 한 번 더 띄운다(사본마다 한 번)."""
     store = store or _Store()
-    k = (now or now_utc()).astimezone(KST)
+    now = now or now_utc()
+    k = now.astimezone(KST)
     if (k.hour, k.minute) < START_AT:
         return "not-yet"
     day = k.date().isoformat()
-    if (_read_json(store, STATE) or {}).get("attempt_day") == day:
-        return "done-today"
+    state = _read_json(store, STATE) or {}
+    if state.get("attempt_day") == day:
+        built = _new_snapshot(state, now, latest_fn or dbx.lims_snapshot.latest_meta)
+        if not built:
+            return "done-today"
+        write_state(store, snapshot_built_at=built)      # 같은 사본으로 다시 띄우지 않게 먼저 적는다
+        return (start or start_child)([])
     write_state(store, attempt_day=day)          # 재시작해도 같은 날 다시 돌지 않게 먼저 적는다
     return (start or start_child)(["--wait-fresh"])
 
@@ -558,7 +599,6 @@ def main(argv=None) -> int:
     ap.add_argument("--offline", metavar="SNAPSHOT", help="오프라인 LIMS 사본으로 조회(DuckDB 필요, --out 과 함께)")
     ap.add_argument("--keep", type=int, default=KEEP, help=f"남길 판 수(기본 {KEEP})")
     a = ap.parse_args(argv)
-    dbx.lims_snapshot.disable()      # 넘김은 다른 앱이 받는 자료 — PC 업로드 사본으로 만들지 않는다
     query = None
     if a.offline:
         if not a.out:
